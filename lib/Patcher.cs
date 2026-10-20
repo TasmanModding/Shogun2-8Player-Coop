@@ -1,0 +1,914 @@
+// Builds a patched copy of empire.retail.dll for the 8-player MP campaign co-op mod
+// (extends the 4-player mod's lobby patch from panels 3-4 to panels 3-8 and raises the session to 8 players).
+// Never modifies its input: it reads the original, checks it is exactly the expected build, and writes a new file.
+//
+// Patch 1 (lobby binds 4 player panels instead of 2):
+//   In the lobby's panel-binding routine (11029C20) the original code looks up "panel_player1" and
+//   "panel_player2" by name. We keep both lookups' name pushes untouched (their absolute addresses are
+//   fixed up by the loader under ASLR), replace one 5-byte CALL with a 5-byte JMP into new code placed in
+//   the unused tail of .text, finish the panel_player2 lookup there exactly as before, then look up
+//   "panel_player3".."panel_player8". The new code is position-independent (no relocations needed)
+//   and skips any panel that isn't present, so without the new layout the lobby still has 2 panels.
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+
+public static class EightPlayerPatcher {
+	public const string OriginalSha256 = "022FAE2E2DA92B59B8B1B8EE52887003C624E3C8ECA060B209F5D792A7F874F5";
+	const uint ImageBase = 0x10000000;
+	public const int MaxPlayers = 8;   // the engine's MP battles already support 8 (4v4); the lobby layout has 8 panels
+	static readonly string[] PanelNames = { "panel_player3", "panel_player4", "panel_player5", "panel_player6", "panel_player7", "panel_player8" };
+
+	// engine functions used by the panel lookup (absolute VAs in the original image)
+	const uint StrCtor = 0x100ECFA0;     // construct engine string from const char* (thiscall, 1 arg)
+	const uint FindChild = 0x10F8CF70;   // find component by name (thiscall on root, 1 arg)
+	const uint PushBack = 0x10098B40;    // vector push_back (thiscall, 1 arg)
+	const uint StrDtor = 0x100A0B00;     // destroy engine string (thiscall)
+
+	const uint HookAt = 0x11029CBA;      // CALL StrCtor inside the panel_player2 lookup
+	const uint ResumeAt = 0x11029CE8;    // first instruction after the panel_player2 lookup
+
+	static byte[] b; static int peOff, secTable, nSec;
+
+	static int VaToOff(uint va) {
+		uint rva = va - ImageBase;
+		for (int i = 0; i < nSec; i++) {
+			int s = secTable + i * 40;
+			uint vaS = BitConverter.ToUInt32(b, s + 12), raw = BitConverter.ToUInt32(b, s + 16), rawOff = BitConverter.ToUInt32(b, s + 20);
+			if (rva >= vaS && rva < vaS + raw) return (int)(rawOff + (rva - vaS));
+		}
+		throw new Exception(string.Format("VA {0:X8} not in any section's file data", va));
+	}
+
+	static string Sha(byte[] d) { using (var h = SHA256.Create()) return BitConverter.ToString(h.ComputeHash(d)).Replace("-", ""); }
+
+	class Asm {
+		public uint Va; public List<byte> Bytes = new List<byte>();
+		public uint Here { get { return Va + (uint)Bytes.Count; } }
+		public void Raw(params byte[] x) { Bytes.AddRange(x); }
+		public void Call(uint target) { Raw(0xE8); Rel32(target, 4); }
+		public void Jmp(uint target) { Raw(0xE9); Rel32(target, 4); }
+		void Rel32(uint target, int len) { int rel = (int)(target - (Here + (uint)len)); Bytes.AddRange(BitConverter.GetBytes(rel)); }
+
+		// named labels for jumps inside the emitted code
+		class Fix { public int Idx; public uint Next; public string Label; public bool Short; }
+		readonly Dictionary<string, uint> labels = new Dictionary<string, uint>();
+		readonly List<Fix> fixes = new List<Fix>();
+		public void Mark(string label) { labels[label] = Here; }
+		public void J8(byte opcode, string label) { Raw(opcode, 0); fixes.Add(new Fix { Idx = Bytes.Count - 1, Next = Here, Label = label, Short = true }); }
+		public void J32(string label, params byte[] opcode) { Raw(opcode); Raw(0, 0, 0, 0); fixes.Add(new Fix { Idx = Bytes.Count - 4, Next = Here, Label = label }); }
+		public void Resolve() {
+			foreach (var f in fixes) {
+				int d = (int)labels[f.Label] - (int)f.Next;
+				if (f.Short) {
+					if (d < -128 || d > 127) throw new Exception("short jump to " + f.Label + " out of range");
+					Bytes[f.Idx] = unchecked((byte)(sbyte)d);
+				}
+				else { var v = BitConverter.GetBytes(d); for (int i = 0; i < 4; i++) Bytes[f.Idx + i] = v[i]; }
+			}
+			fixes.Clear();
+		}
+	}
+
+	// ---- post-battle result for players who were not in the battle -------------------------------------
+	// The campaign "battle results" popup takes its point of view from FUN_11107ee0: it asks the battle
+	// (FUN_105b7b90) for the local faction's side. A faction that did not fight is on neither side, so the
+	// "is attacker" flag stays 0 and every onlooker is shown the DEFENDER's result (or, via the battle's
+	// fallback list, whatever faction happens to be last in it). Attackers winning therefore showed
+	// "defeat" to their allies, defenders winning showed "victory".
+	// Fix: if the local faction did not fight, take the side of the first faction that did fight and is
+	// allied to it (humans first, then any faction), using the engine's own tests: diplomatic alliance
+	// (or same faction / vassal), or both in the co-op faction list.
+	const uint AllyHookAt = 0x11107F30;    // xor eax,eax / cmp [esp+1Ch],al / sete al / mov [ebx+4],eax (12 bytes)
+	const uint AllyResume = 0x11107F3C;
+	const uint BattleSideOf = 0x105B7AB0;  // thiscall(battle; faction, bool* is_attacker) -> participant or 0
+	const uint FactionsAllied = 0x105CA920; // thiscall(faction; other) -> al = allied (diplomacy, same faction)
+	const uint CoopTeammates = 0x1068D240;  // cdecl(faction, other) -> al = both in the campaign's co-op faction list
+
+	static uint EmitAllyResultFix(Asm a) {
+		// entry: ebx = result info, ebp = local faction, edi = battle, esi = &ui model ptr, [esp+1Ch] = is_attacker
+		uint at = a.Here;
+		a.Raw(0x6A, 0x00);                                // push 0                  (no flag wanted)
+		a.Raw(0x55);                                      // push ebp
+		a.Raw(0x8B, 0xCF);                                // mov ecx,edi
+		a.Call(BattleSideOf);
+		a.Raw(0x85, 0xC0);                                // test eax,eax
+		a.J32("original", 0x0F, 0x85);                    // jnz original            (local faction fought: unchanged)
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0x6A, 0x01);                                // push 1                  (pass 1: humans only, pass 0: anyone)
+		a.Mark("pass");
+		a.Raw(0x8B, 0x44, 0x24, 0x08);                    // mov eax,[esp+8]         (saved esi)
+		a.Raw(0x8B, 0x00);                                // mov eax,[eax]
+		a.Raw(0x8B, 0x40, 0x08);                          // mov eax,[eax+8]         (campaign model)
+		a.Raw(0x8B, 0x80, 0x98, 0x14, 0x00, 0x00);        // mov eax,[eax+1498h]     (faction list owner)
+		a.Raw(0x8B, 0x58, 0x44);                          // mov ebx,[eax+44h]       (begin)
+		a.Raw(0x8B, 0x48, 0x40);                          // mov ecx,[eax+40h]       (count)
+		a.Raw(0x8D, 0x34, 0x8B);                          // lea esi,[ebx+ecx*4]     (end)
+		a.Mark("next");
+		a.Raw(0x3B, 0xDE);                                // cmp ebx,esi
+		a.J32("pass_end", 0x0F, 0x83);                    // jae pass_end
+		a.Raw(0x8B, 0x0B);                                // mov ecx,[ebx]           (candidate faction)
+		a.Raw(0x83, 0xC3, 0x04);                          // add ebx,4
+		a.Raw(0x3B, 0xCD);                                // cmp ecx,ebp
+		a.J8(0x74, "next");                               // je next
+		a.Raw(0x83, 0x3C, 0x24, 0x00);                    // cmp dword ptr [esp],0
+		a.J8(0x74, "check");                              // je check                (pass 0: any faction)
+		a.Raw(0x80, 0xB9, 0xA0, 0x06, 0x00, 0x00, 0x00);  // cmp byte ptr [ecx+6A0h],0 (is human)
+		a.J8(0x74, "next");                               // je next
+		a.Mark("check");
+		a.Raw(0x51);                                      // push ecx                (keep candidate)
+		a.Raw(0x51);                                      // push ecx                (other)
+		a.Raw(0x8B, 0xCD);                                // mov ecx,ebp             (local faction)
+		a.Call(FactionsAllied);
+		a.Raw(0x59);                                      // pop ecx
+		a.Raw(0x84, 0xC0);                                // test al,al
+		a.J8(0x75, "allied");                             // jne allied
+		a.Raw(0x51);                                      // push ecx                (keep candidate)
+		a.Raw(0x51);                                      // push ecx                (b)
+		a.Raw(0x55);                                      // push ebp                (a = local faction)
+		a.Call(CoopTeammates);
+		a.Raw(0x83, 0xC4, 0x08);                          // add esp,8
+		a.Raw(0x59);                                      // pop ecx
+		a.Raw(0x84, 0xC0);                                // test al,al
+		a.J8(0x74, "next");                               // je next
+		a.Mark("allied");
+		a.Raw(0x6A, 0x00);                                // push 0                  (flag slot)
+		a.Raw(0x54);                                      // push esp                (&flag slot)
+		a.Raw(0x51);                                      // push ecx
+		a.Raw(0x8B, 0xCF);                                // mov ecx,edi
+		a.Call(BattleSideOf);
+		a.Raw(0x5A);                                      // pop edx                 (dl = ally is attacker)
+		a.Raw(0x85, 0xC0);                                // test eax,eax
+		a.J8(0x74, "next");                               // je next                 (ally didn't fight)
+		a.Raw(0x88, 0x54, 0x24, 0x40);                    // mov [esp+40h],dl        (caller's is_attacker: 1Ch + 20h pushad + 4)
+		a.J8(0xEB, "finish");                             // jmp finish
+		a.Mark("pass_end");
+		a.Raw(0xFF, 0x0C, 0x24);                          // dec dword ptr [esp]
+		a.J32("pass", 0x0F, 0x89);                        // jns pass
+		a.Mark("finish");
+		a.Raw(0x83, 0xC4, 0x04);                          // add esp,4
+		a.Raw(0x61);                                      // popad
+		a.Mark("original");
+		a.Raw(0x33, 0xC0);                                // xor eax,eax             (replaced instructions)
+		a.Raw(0x38, 0x44, 0x24, 0x1C);                    // cmp [esp+1Ch],al
+		a.Raw(0x0F, 0x94, 0xC0);                          // sete al
+		a.Raw(0x89, 0x43, 0x04);                          // mov [ebx+4],eax
+		a.Jmp(AllyResume);
+		a.Resolve();
+		return at;
+	}
+
+	// ---- deterministic floating-point modes -------------------------------------------------------------
+	// Multiplayer is lockstep: every PC runs the same simulation and compares checksums, so every PC must do
+	// its maths identically. The engine never sets the CPU's floating-point modes itself (the only FLDCW/LDMXCSR
+	// in it are float->int helpers that restore whatever mode was active, and CRT internals), and TBB copies
+	// the main thread's modes to its worker threads. So anything that changes them on one PC - overlays,
+	// anti-virus hooks, drivers, code run on alt-tab - makes that PC's simulation drift: a desync.
+	// Fix: load the Windows/MSVC defaults (x87 control 027Fh: 53-bit precision, round to nearest, exceptions
+	// masked; MXCSR 1F80h: round to nearest, no flush-to-zero/denormals-are-zero) before the simulation runs:
+	// at the start of each frame's game update and at the start of each battle tick. On a PC where nothing
+	// changed them this does nothing.
+	const uint FrameUpdateCall = 0x100B190C;   // main frame: call FUN_10f36680 (multiplayer update), first game logic
+	const uint MultiplayerUpdate = 0x10F36680;
+	const uint BattleTickAt = 0x10227D40;      // battle tick (vtable slot 33): push [esp+8] / mov ecx,[esp+10h]
+	const uint BattleTickResume = 0x10227D48;
+
+	static void EmitPinFloatModes(Asm a) {
+		a.Raw(0x83, 0xEC, 0x04);                          // sub esp,4
+		a.Raw(0x66, 0xC7, 0x04, 0x24, 0x7F, 0x02);        // mov word ptr [esp],027Fh
+		a.Raw(0xD9, 0x2C, 0x24);                          // fldcw word ptr [esp]
+		a.Raw(0xC7, 0x04, 0x24, 0x80, 0x1F, 0x00, 0x00);  // mov dword ptr [esp],1F80h
+		a.Raw(0x0F, 0xAE, 0x14, 0x24);                    // ldmxcsr dword ptr [esp]
+		a.Raw(0x83, 0xC4, 0x04);                          // add esp,4
+	}
+
+	static uint EmitFramePin(Asm a) {
+		// replaces "call FUN_10f36680" (ecx = its this): pin, then tail-call the original
+		uint at = a.Here;
+		EmitResyncKeyPoll(a);
+		EmitPinFloatModes(a);
+		a.Jmp(MultiplayerUpdate);
+		return at;
+	}
+
+	static uint EmitBattleTickPin(Asm a) {
+		uint at = a.Here;
+		EmitPinFloatModes(a);
+		a.Raw(0xFF, 0x74, 0x24, 0x08);                    // push dword ptr [esp+8]  (replaced instructions)
+		a.Raw(0x8B, 0x4C, 0x24, 0x10);                    // mov ecx,[esp+10h]
+		a.Jmp(BattleTickResume);
+		return at;
+	}
+
+	// ---- battle desyncs no longer drop the player ---------------------------------------------------------
+	// A battle cannot be resynced, so when its checksums differ the engine disconnects (mp_desync_kick_enabled):
+	// the desync handler FUN_10ee9a50 drops the local player, and FUN_10ef9a20 (another player reported a
+	// desync) has the host kick the reported players / the reported client leave. Both now skip the kick
+	// while a battle is running ([session+596D0h] = battle environment, the same test the handler uses to log
+	// "mp_battle_desync"). The battle carries on; back on the campaign map any difference is caught by the
+	// campaign checksums and the (automatic) campaign resync copies the host's state to everyone.
+	// Campaign desyncs keep the original behaviour. The absolute flag reads (relocated) are left untouched.
+	const uint DesyncKickAt = 0x10EE9A71;        // mov ecx,[edi+2BE74h] (6 bytes); edi = session+4
+	const uint DesyncKickResume = 0x10EE9A77;
+	const uint DesyncKickSkip = 0x10EE9A8D;
+	const uint ReportKickAt = 0x10EF9A87;        // push ebp / push edi / lea eax,[esp+10h] (6 bytes); ebx = session
+	const uint ReportKickResume = 0x10EF9A8D;
+	const uint ReportKickSkip = 0x10EF9B29;
+
+	static uint EmitBattleNoKick(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x83, 0xBF, 0xCC, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [edi+596CCh],0   (battle running?)
+		a.J32("skip", 0x0F, 0x85);                        // jne -> no kick
+		a.Raw(0x8B, 0x8F, 0x74, 0xBE, 0x02, 0x00);        // mov ecx,[edi+2BE74h]          (replaced instruction)
+		a.Jmp(DesyncKickResume);
+		a.Mark("skip");
+		a.Jmp(DesyncKickSkip);
+		a.Resolve();
+		return at;
+	}
+
+	static uint EmitReportNoKick(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x83, 0xBB, 0xD0, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [ebx+596D0h],0
+		a.J32("skip", 0x0F, 0x85);                        // jne -> no kick
+		a.Raw(0x55, 0x57);                                // push ebp / push edi            (replaced instructions)
+		a.Raw(0x8D, 0x44, 0x24, 0x10);                    // lea eax,[esp+10h]
+		a.Jmp(ReportKickResume);
+		a.Mark("skip");
+		a.Jmp(ReportKickSkip);
+		a.Resolve();
+		return at;
+	}
+
+	// ---- save/load screens leak the player's Windows locale into the simulation --------------------------
+	// FUN_110b83f0 (run when the save list, load list or save dialog opens, to format save dates) calls
+	// _wsetlocale(LC_ALL, "<language>_<country>.<codepage>"). Only some of those screens call FUN_110b55d0 to go
+	// back to "C", and only if they still own the token; so after a player opens Save or Load, the C runtime on
+	// that PC stays in the Windows locale for the rest of the session: number parsing/printing (decimal comma
+	// on German, Czech, French, Russian... Windows), character case rules (Turkish I) and so on now differ from
+	// the other players' PCs. This fits the long-standing "only the host should save" advice and CA's own
+	// "German vs Czech desync" patch.
+	// Fix: switch only LC_TIME there (all those screens need is the dates); everything else stays "C".
+	const uint SaveScreenLocaleCategory = 0x110B84E1;   // push 0 (LC_ALL) -> push 5 (LC_TIME), before call _wsetlocale
+
+	// ---- invite buttons on slots 3..8 -------------------------------------------------------------------
+	// The lobby wires only the FIRST "button_invite" under its root (10FD5B36: FindChild + AddListener), the one
+	// in the frame behind panel 2. The copies behind panels 3..8 showed tooltips but did nothing when clicked,
+	// so once player 2 had joined there was no working invite button. The layout names those frames
+	// invite_frame3..8; this wires each frame's button to the same listener and shows it to the host only
+	// (as 10FD5EB4 does for the first one).
+	const uint InviteWireAt = 0x10FD5B70;      // mov esi,[ebx+4] / lea ecx,[esp+20h]  (ebx = lobby)
+	const uint InviteWireResume = 0x10FD5B77;
+	const uint SessionIsHost = 0x10F00940;     // thiscall(session) -> al
+	const uint SetVisible = 0x10F9C360;        // thiscall(component; bool) ret 4
+
+	static uint EmitInviteWiring(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0x83, 0xEC, 0x14);                          // sub esp,14h             (temp string + [esp+10h] = strings)
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint popAt = a.Here;
+		a.Raw(0x58);                                      // pop eax
+		int stringsIdx = a.Bytes.Count + 1;
+		a.Raw(0x05, 0, 0, 0, 0);                          // add eax, strings - popAt
+		a.Raw(0x89, 0x44, 0x24, 0x10);                    // mov [esp+10h],eax
+		a.Raw(0x33, 0xED);                                // xor ebp,ebp             (frame index 0..5)
+		a.Mark("loop");
+		a.Raw(0x6B, 0xC5, 0x0E);                          // imul eax,ebp,14
+		a.Raw(0x03, 0x44, 0x24, 0x10);                    // add eax,[esp+10h]       (-> "invite_frameN")
+		a.Raw(0x50);                                      // push eax
+		a.Raw(0x8D, 0x4C, 0x24, 0x04);                    // lea ecx,[esp+4]
+		a.Call(StrCtor);
+		a.Raw(0x8B, 0x4B, 0x04);                          // mov ecx,[ebx+4]         (root)
+		a.Raw(0x54);                                      // push esp                (&temp)
+		a.Call(FindChild);
+		a.Raw(0x8B, 0xF0);                                // mov esi,eax
+		a.Raw(0x8B, 0xCC);                                // mov ecx,esp
+		a.Call(StrDtor);
+		a.Raw(0x85, 0xF6);                                // test esi,esi
+		a.J32("next", 0x0F, 0x84);                        // jz next
+		a.Raw(0x8B, 0x44, 0x24, 0x10);                    // mov eax,[esp+10h]
+		a.Raw(0x83, 0xC0, 6 * 14);                        // add eax,84              (-> "button_invite")
+		a.Raw(0x50);                                      // push eax
+		a.Raw(0x8D, 0x4C, 0x24, 0x04);                    // lea ecx,[esp+4]
+		a.Call(StrCtor);
+		a.Raw(0x8B, 0xCE);                                // mov ecx,esi             (search inside this frame)
+		a.Raw(0x54);                                      // push esp
+		a.Call(FindChild);
+		a.Raw(0x8B, 0xF0);                                // mov esi,eax             (its invite button)
+		a.Raw(0x8B, 0xCC);                                // mov ecx,esp
+		a.Call(StrDtor);
+		a.Raw(0x85, 0xF6);                                // test esi,esi
+		a.J8(0x74, "next");                               // jz next
+		a.Raw(0x8B, 0x8E, 0x18, 0x03, 0x00, 0x00);        // mov ecx,[esi+318h]      (button handler object)
+		a.Raw(0x85, 0xC9);                                // test ecx,ecx
+		a.J8(0x74, "visible");                            // jz visible
+		a.Raw(0x83, 0xC1, 0x14);                          // add ecx,14h
+		a.Raw(0x8D, 0x43, 0x2C);                          // lea eax,[ebx+2Ch]       (lobby listener, as 10FD5B13)
+		a.Raw(0x50);                                      // push eax
+		a.Call(AddListener);
+		a.Mark("visible");
+		a.Raw(0x33, 0xC0);                                // xor eax,eax
+		a.Raw(0x8B, 0x8B, 0x88, 0x00, 0x00, 0x00);        // mov ecx,[ebx+88h]       (session)
+		a.Raw(0x85, 0xC9);                                // test ecx,ecx
+		a.J8(0x74, "setvis");                             // jz setvis
+		a.Call(SessionIsHost);
+		a.Raw(0x0F, 0xB6, 0xC0);                          // movzx eax,al
+		a.Mark("setvis");
+		a.Raw(0x50);                                      // push eax
+		a.Raw(0x8B, 0xCE);                                // mov ecx,esi
+		a.Call(SetVisible);
+		a.Mark("next");
+		a.Raw(0x45);                                      // inc ebp
+		a.Raw(0x83, 0xFD, 0x06);                          // cmp ebp,6
+		a.J32("loop", 0x0F, 0x82);                        // jb loop
+		a.Raw(0x83, 0xC4, 0x14);                          // add esp,14h
+		a.Raw(0x61);                                      // popad
+		a.Raw(0x8B, 0x73, 0x04);                          // mov esi,[ebx+4]         (replaced instructions)
+		a.Raw(0x8D, 0x4C, 0x24, 0x20);                    // lea ecx,[esp+20h]
+		a.Jmp(InviteWireResume);
+		uint strings = a.Here;
+		for (int n = 3; n <= 8; n++) { a.Bytes.AddRange(Encoding.ASCII.GetBytes("invite_frame" + n)); a.Raw(0x00); }
+		a.Bytes.AddRange(Encoding.ASCII.GetBytes("button_invite")); a.Raw(0x00);
+		FixImm32(a, stringsIdx, strings - popAt);
+		a.Resolve();
+		return at;
+	}
+
+	// ---- automatic campaign resync ---------------------------------------------------------------------
+	// On a campaign desync FUN_10f058d0 marks a resync as pending ([resync+30h] = 1) and tells its listeners,
+	// which open the "mp_campaign_desync" popup. Nothing happens until someone presses OK there
+	// (FUN_11103d10 -> FUN_10f2d4b0(session, 1), which sends message 0xAC). Until then the game sits out
+	// of sync, and pressing Cancel or leaving it drops the player.
+	// Fix: accept straight away, exactly as the OK button does. The popup still shows the resync progress.
+	const uint ResyncNotifyCall = 0x10F05914;  // call FUN_102fc670 (notify listeners); esi = resync, edi = session
+	const uint NotifyListeners = 0x102FC670;   // thiscall(list; arg) ret 4
+	const uint AnswerResync = 0x10F2D4B0;      // thiscall(resync; session, bool accept) ret 8
+
+	static uint EmitAutoResync(Asm a) {
+		uint at = a.Here;
+		a.Raw(0xFF, 0x74, 0x24, 0x04);                    // push dword ptr [esp+4]  (the listeners' argument)
+		a.Call(NotifyListeners);                          // ecx = esi on entry, as the original call
+		a.Raw(0x6A, 0x01);                                // push 1                  (accept)
+		a.Raw(0x57);                                      // push edi                (session)
+		a.Raw(0x8B, 0xCE);                                // mov ecx,esi             (resync state)
+		a.Call(AnswerResync);
+		a.Raw(0xC2, 0x04, 0x00);                          // ret 4
+		return at;
+	}
+
+	// ---- host resync key (Ctrl+Shift+F9) --------------------------------------------------------------
+	// A resync only starts on a PC that noticed a checksum mismatch itself. Desyncs that hang the game instead
+	// (one PC stuck on an AI turn while another thinks it is a player's turn) never start one, and players who
+	// didn't notice ignore the others' 0xAC "accept" messages (FUN_10efa140 needs state 1..3).
+	// Resync itself: once every PC has accepted, the host saves the campaign, sends the file and everyone loads it.
+	// Fix:
+	//   - host presses Ctrl+Shift+F9 (campaign, no resync running): it starts its own resync and broadcasts 0xAC
+	//     with value 2 ("force").
+	//   - every PC, the host included, that receives a "force" while idle starts a resync exactly as on a detected
+	//     desync (FUN_10f058d0: popup + the auto-accept above), then the message counts as a normal accept.
+	// FUN_10f058d0 still requires the campaign map, so the key does nothing in battles or the front end.
+	const uint ResyncAnswerCall = 0x10F10E2D;  // message 0xAC: call FUN_10efa140(resync; session, is_local, accept)
+	const uint ResyncAnswer = 0x10EFA140;
+	const uint StartResync = 0x10F058D0;       // thiscall(resync; session) ret 4
+	const uint SendResyncAnswer = 0x10F27820;  // thiscall(session; value) ret 4: broadcast message 0xAC
+	const uint GetAsyncKeyStateIat = 0x115A1558;
+	const uint ResyncKeyPrevVa = 0x11CB1534;   // key held last frame (second reserved .data dword)
+
+	static uint EmitForcedResyncAnswer(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x80, 0x7C, 0x24, 0x0C, 0x02);              // cmp byte ptr [esp+0Ch],2   (accept == force?)
+		a.J8(0x75, "go");                                 // jne go
+		a.Raw(0xC6, 0x44, 0x24, 0x0C, 0x01);              // mov byte ptr [esp+0Ch],1   (counts as a normal accept)
+		a.Raw(0x83, 0x79, 0x30, 0x00);                    // cmp dword ptr [ecx+30h],0  (no resync running)
+		a.J8(0x75, "go");                                 // jne go
+		a.Raw(0x51);                                      // push ecx
+		a.Raw(0xFF, 0x74, 0x24, 0x08);                    // push dword ptr [esp+8]     (session)
+		a.Call(StartResync);                              // ecx = resync
+		a.Raw(0x59);                                      // pop ecx
+		a.Mark("go");
+		a.Jmp(ResyncAnswer);
+		a.Resolve();
+		return at;
+	}
+
+	// polled once per frame from the frame hook (ebp = owner, [ebp+58h] = session); keeps every register
+	static void EmitResyncKeyPoll(Asm a) {
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint popAt = a.Here;
+		a.Raw(0x5E);                                      // pop esi
+		a.Raw(0x8B, 0x9E); a.Bytes.AddRange(BitConverter.GetBytes(GetAsyncKeyStateIat - popAt));   // mov ebx,[esi+iat]
+		a.Raw(0x8D, 0xBE); a.Bytes.AddRange(BitConverter.GetBytes(ResyncKeyPrevVa - popAt));       // lea edi,[esi+prev]
+		foreach (byte vk in new byte[] { 0x78, 0x11, 0x10 }) {   // F9, Ctrl, Shift
+			a.Raw(0x6A, vk);                              // push vk
+			a.Raw(0xFF, 0xD3);                            // call ebx                (GetAsyncKeyState)
+			a.Raw(0xF6, 0xC4, 0x80);                      // test ah,80h             (held)
+			a.J32("up", 0x0F, 0x84);                      // jz up
+		}
+		a.Raw(0x83, 0x3F, 0x00);                          // cmp dword ptr [edi],0   (only on the press itself)
+		a.J8(0x75, "done");                               // jne done
+		a.Raw(0xC7, 0x07, 0x01, 0x00, 0x00, 0x00);        // mov dword ptr [edi],1
+		a.Raw(0x8B, 0x4D, 0x58);                          // mov ecx,[ebp+58h]       (session)
+		a.Raw(0x85, 0xC9);                                // test ecx,ecx
+		a.J8(0x74, "done");                               // jz done
+		a.Call(SessionIsHost);
+		a.Raw(0x84, 0xC0);                                // test al,al
+		a.J8(0x74, "done");                               // jz done
+		a.Raw(0x8B, 0x4D, 0x58);                          // mov ecx,[ebp+58h]
+		a.Raw(0x8B, 0x81, 0x78, 0xBE, 0x02, 0x00);        // mov eax,[ecx+2BE78h]    (resync state)
+		a.Raw(0x85, 0xC0);                                // test eax,eax
+		a.J8(0x74, "done");                               // jz done
+		a.Raw(0x83, 0x78, 0x30, 0x00);                    // cmp dword ptr [eax+30h],0
+		a.J8(0x75, "done");                               // jne done
+		a.Raw(0x8B, 0xF0);                                // mov esi,eax
+		a.Raw(0x51);                                      // push ecx                (session)
+		a.Raw(0x8B, 0xCE);                                // mov ecx,esi
+		a.Call(StartResync);                              // the host's own resync (popup + auto-accept)
+		a.Raw(0x83, 0x7E, 0x30, 0x00);                    // cmp dword ptr [esi+30h],0
+		a.J8(0x74, "done");                               // je done                 (not on the campaign map)
+		a.Raw(0x8B, 0x4D, 0x58);                          // mov ecx,[ebp+58h]
+		a.Raw(0x6A, 0x02);                                // push 2                  (force: everyone else joins)
+		a.Call(SendResyncAnswer);                         // ecx = session
+		a.J8(0xEB, "done");                               // jmp done
+		a.Mark("up");
+		a.Raw(0xC7, 0x07, 0x00, 0x00, 0x00, 0x00);        // mov dword ptr [edi],0
+		a.Mark("done");
+		a.Raw(0x61);                                      // popad
+		a.Resolve();
+	}
+
+	// ---- battle "gift units" with more than one spectator ---------------------------------------------
+	// The gift button handler (FUN_110e5090) asks FUN_110de560 for the other party: it lists the session's
+	// spectating players (FUN_10ef3150) and returns the FIRST one. So with several spectators only the first
+	// could ever receive units, and a second spectator could not hand units back (their "source" was
+	// spectator #1, and the engine only transfers units the local player holds).
+	// Fix, only at the gift handler's call:
+	//   - the player fighting: each press gives the selected units to the next spectator in turn
+	//     (round-robin over the current spectator list; with one spectator nothing changes)
+	//   - a spectator: the source is always the local player, so anyone can hand gifted units back
+	const uint GiftPickCall = 0x110E50FA;    // call FUN_110de560 inside the gift handler
+	const uint ListSpectators = 0x10EF3150;  // thiscall(session; vector<uint>* out) {cap, count, data}
+	const uint EngineFree = 0x100F04D0;      // cdecl free
+	const uint GiftCounterVa = 0x11CB1530;   // first dword after .data's VirtualSize (zeroed, writable)
+
+	static uint EmitGiftPartnerPicker(Asm a) {
+		// thiscall(ui; uint* out), ret 4 - same contract as FUN_110de560
+		uint at = a.Here;
+		a.Raw(0x53, 0x56, 0x57);                          // push ebx / push esi / push edi
+		a.Raw(0x8B, 0x81, 0x10, 0x01, 0x00, 0x00);        // mov eax,[ecx+110h]      (battle setup)
+		a.Raw(0x8B, 0x98, 0x48, 0x82, 0x02, 0x00);        // mov ebx,[eax+28248h]    (session)
+		a.Raw(0x80, 0xB8, 0xE9, 0x81, 0x02, 0x00, 0x00);  // cmp byte ptr [eax+281E9h],0
+		a.J32("spectator", 0x0F, 0x85);                   // jne spectator
+		// --- fighting player: next spectator in turn ---
+		a.Raw(0x6A, 0x00, 0x6A, 0x00, 0x6A, 0x00);        // push 0 x3               (list: cap, count, data)
+		a.Raw(0x54);                                      // push esp
+		a.Raw(0x8B, 0xCB);                                // mov ecx,ebx
+		a.Call(ListSpectators);
+		a.Raw(0x83, 0xCA, 0xFF);                          // or edx,-1               (none: -1, as the original)
+		a.Raw(0x8B, 0x4C, 0x24, 0x04);                    // mov ecx,[esp+4]         (count)
+		a.Raw(0x85, 0xC9);                                // test ecx,ecx
+		a.J8(0x74, "store");                              // jz store
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint popAt = a.Here;
+		a.Raw(0x5F);                                      // pop edi
+		a.Raw(0x81, 0xC7);                                // add edi, counter - popAt
+		a.Bytes.AddRange(BitConverter.GetBytes(GiftCounterVa - popAt));
+		a.Raw(0x8B, 0x07);                                // mov eax,[edi]
+		a.Raw(0xFF, 0x07);                                // inc dword ptr [edi]
+		a.Raw(0x33, 0xD2);                                // xor edx,edx
+		a.Raw(0xF7, 0xF1);                                // div ecx                 (edx = turn % count)
+		a.Raw(0x8B, 0x44, 0x24, 0x08);                    // mov eax,[esp+8]         (data)
+		a.Raw(0x8B, 0x14, 0x90);                          // mov edx,[eax+edx*4]
+		a.Mark("store");
+		a.Raw(0x8B, 0x44, 0x24, 0x1C);                    // mov eax,[esp+1Ch]       (out: 0Ch list + 0Ch saves + ret)
+		a.Raw(0x89, 0x10);                                // mov [eax],edx
+		a.Raw(0x8B, 0x4C, 0x24, 0x08);                    // mov ecx,[esp+8]
+		a.Raw(0x85, 0xC9);                                // test ecx,ecx
+		a.J8(0x74, "freed");                              // jz freed
+		a.Raw(0x51);                                      // push ecx
+		a.Call(EngineFree);
+		a.Raw(0x83, 0xC4, 0x04);                          // add esp,4
+		a.Mark("freed");
+		a.Raw(0x83, 0xC4, 0x0C);                          // add esp,0Ch
+		a.J8(0xEB, "done");                               // jmp done
+		// --- spectator: the units come from the local player ---
+		a.Mark("spectator");
+		a.Raw(0x8B, 0x8B, 0xF0, 0x96, 0x05, 0x00);        // mov ecx,[ebx+596F0h]    (network interface)
+		a.Raw(0x83, 0xC8, 0xFF);                          // or eax,-1
+		a.Raw(0x85, 0xC9);                                // test ecx,ecx
+		a.J8(0x74, "spec_store");                         // jz spec_store
+		a.Raw(0x8B, 0x01);                                // mov eax,[ecx]
+		a.Raw(0xFF, 0x50, 0x10);                          // call [eax+10h]          (local player id)
+		a.Mark("spec_store");
+		a.Raw(0x8B, 0x54, 0x24, 0x10);                    // mov edx,[esp+10h]       (out)
+		a.Raw(0x89, 0x02);                                // mov [edx],eax
+		a.Mark("done");
+		a.Raw(0x5F, 0x5E, 0x5B);                          // pop edi / pop esi / pop ebx
+		a.Raw(0xC2, 0x04, 0x00);                          // ret 4
+		a.Resolve();
+		return at;
+	}
+
+	static void ReserveDataDword(uint va) {
+		// grow .data's in-memory size (zero-filled, writable) so it covers va; must stay in .data's last page
+		for (int i = 0; i < nSec; i++) {
+			int s = secTable + i * 40;
+			if (Encoding.ASCII.GetString(b, s, 5) != ".data") continue;
+			uint vaStart = ImageBase + BitConverter.ToUInt32(b, s + 12);
+			uint vs = BitConverter.ToUInt32(b, s + 8);
+			uint nextVa = ImageBase + BitConverter.ToUInt32(b, s + 40 + 12);
+			if (va < vaStart + vs || va + 4 > nextVa) throw new Exception("data slot not in .data's slack");
+			if (va + 4 - vaStart > ((vs + 0xFFF) & ~0xFFFu)) throw new Exception("data slot would need another page");
+			Array.Copy(BitConverter.GetBytes(va + 4 - vaStart), 0, b, s + 8, 4);
+			return;
+		}
+		throw new Exception(".data not found");
+	}
+
+	// ---- extra code section --------------------------------------------------------------------------
+	// The .text slack is used up by the lobby code, so this mod's other fixes live in a new section
+	// ".s2mp" appended after the last one. Its code uses only relative calls/jumps (no relocations).
+	static uint NewSectionVa() {
+		uint sizeOfImage = BitConverter.ToUInt32(b, peOff + 24 + 56);
+		return ImageBase + sizeOfImage;
+	}
+
+	static void AddSection(string name, List<byte> code) {
+		int opt = peOff + 24;
+		uint fileAlign = BitConverter.ToUInt32(b, opt + 36), sectAlign = BitConverter.ToUInt32(b, opt + 32);
+		uint sizeOfImage = BitConverter.ToUInt32(b, opt + 56), sizeOfHeaders = BitConverter.ToUInt32(b, opt + 60);
+		int hdr = secTable + nSec * 40;
+		if (hdr + 40 > sizeOfHeaders) throw new Exception("no room for another section header");
+		for (int i = 0; i < 40; i++) if (b[hdr + i] != 0) throw new Exception("section header slot not empty");
+		uint rawPtr = (uint)b.Length;
+		if (rawPtr % fileAlign != 0) throw new Exception("file end is not aligned");
+		uint rawSize = ((uint)code.Count + fileAlign - 1) / fileAlign * fileAlign;
+		var nb = new byte[b.Length + rawSize];
+		Array.Copy(b, nb, b.Length);
+		code.CopyTo(nb, (int)rawPtr);
+		b = nb;
+		Array.Copy(Encoding.ASCII.GetBytes(name.PadRight(8, '\0')), 0, b, hdr, 8);
+		Array.Copy(BitConverter.GetBytes((uint)code.Count), 0, b, hdr + 8, 4);   // VirtualSize
+		Array.Copy(BitConverter.GetBytes(sizeOfImage), 0, b, hdr + 12, 4);       // VirtualAddress
+		Array.Copy(BitConverter.GetBytes(rawSize), 0, b, hdr + 16, 4);
+		Array.Copy(BitConverter.GetBytes(rawPtr), 0, b, hdr + 20, 4);
+		Array.Copy(BitConverter.GetBytes(0x60000020u), 0, b, hdr + 36, 4);       // code | execute | read
+		nSec++;
+		Array.Copy(BitConverter.GetBytes((ushort)nSec), 0, b, peOff + 6, 2);
+		uint newImage = sizeOfImage + ((uint)code.Count + sectAlign - 1) / sectAlign * sectAlign;
+		Array.Copy(BitConverter.GetBytes(newImage), 0, b, opt + 56, 4);
+	}
+
+	// ---- stage 2 (opt-in): per-panel kick buttons --------------------------------------------------
+	const uint AddListener = 0x10090DD0;   // thiscall on (handlerObj ? handlerObj+0x14 : 0), arg = listener
+	const uint KickHookAt = 0x10FD6350;    // click handler: first instr of "kick first non-host" (6 bytes)
+	const uint KickResume = 0x10FD639A;    // click handler: common exit (string dtor + epilogue)
+	const uint ShowHookAt = 0x10FD6681;    // per-member update: mov esi,[edi-50h] / lea ecx,[esp+34h] (7 bytes)
+	const uint ShowResume = 0x10FD6688;    // per-member update: push "button_kick"
+
+	static void ExpectBytes(uint va, params byte[] expected) {
+		int o = VaToOff(va);
+		for (int i = 0; i < expected.Length; i++)
+			if (b[o + i] != expected[i]) throw new Exception(string.Format("unexpected bytes at {0:X8}", va));
+	}
+
+	// retarget an existing "call expected" at 'at' to 'target'
+	static void RedirectCall(uint at, uint expected, uint target) {
+		int o = VaToOff(at);
+		if (b[o] != 0xE8 || (uint)(at + 5 + BitConverter.ToInt32(b, o + 1)) != expected)
+			throw new Exception(string.Format("unexpected call at {0:X8}", at));
+		Array.Copy(BitConverter.GetBytes((int)(target - (at + 5))), 0, b, o + 1, 4);
+	}
+
+	static void PutJmp(uint at, uint target, int patchLen) {
+		int o = VaToOff(at);
+		b[o] = 0xE9;
+		Array.Copy(BitConverter.GetBytes((int)(target - (at + 5))), 0, b, o + 1, 4);
+		for (int i = 5; i < patchLen; i++) b[o + i] = 0x90;   // nop the remainder of the replaced instructions
+	}
+
+	// "call $+5 / pop eax / add eax, imm32" -> eax = runtime address of data placed later (no relocation needed)
+	static int EmitStrAddr(Asm a, out uint popAt) {
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);
+		popAt = a.Here;
+		a.Raw(0x58);                                       // pop eax
+		int idx = a.Bytes.Count + 1;
+		a.Raw(0x05, 0x00, 0x00, 0x00, 0x00);               // add eax, imm32 (filled later)
+		return idx;
+	}
+	static void FixImm32(Asm a, int idx, uint value) {
+		var v = BitConverter.GetBytes(value);
+		for (int i = 0; i < 4; i++) a.Bytes[idx + i] = v[i];
+	}
+	static void FixRel8(Asm a, int idx, uint next, uint target) {
+		int d = (int)target - (int)next;
+		if (d < -128 || d > 127) throw new Exception("short jump out of range");
+		a.Bytes[idx] = unchecked((byte)(sbyte)d);
+	}
+	static void FixRel32(Asm a, int idx, uint next, uint target) { FixImm32(a, idx, unchecked(target - next)); }
+
+	// Stage 2 cave code, emitted right after the panel_player2 completion. Returns the entry points of the
+	// click-handler and per-member-update detours.
+	static void EmitStage2(Asm a, out uint handlerAt, out uint showAt) {
+		var kickRefs = new List<KeyValuePair<int, uint>>();      // (imm32 index, pop address) needing &"button_kick"
+
+		// --- binding loop for panels 3/4, also wiring each panel's own kick button ---------------------------
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint popNames = a.Here;
+		a.Raw(0x5B);                                      // pop ebx
+		int namesIdx = a.Bytes.Count + 2;
+		a.Raw(0x81, 0xC3, 0, 0, 0, 0);                    // add ebx, imm32 (-> names)
+		uint loopAt = a.Here;
+		a.Raw(0x8B, 0x7E, 0x04);                          // mov edi,[esi+4]          (root)
+		a.Raw(0x8D, 0x4C, 0x24, 0x14);                    // lea ecx,[esp+14h]
+		a.Raw(0x53);                                      // push ebx                 (name)
+		a.Call(StrCtor);
+		a.Raw(0x8D, 0x44, 0x24, 0x14);                    // lea eax,[esp+14h]
+		a.Raw(0x8B, 0xCF);                                // mov ecx,edi
+		a.Raw(0x50);                                      // push eax
+		a.Call(FindChild);
+		a.Raw(0x89, 0x44, 0x24, 0x0C);                    // mov [esp+0Ch],eax        (panel)
+		a.Raw(0x8D, 0x4C, 0x24, 0x14);                    // lea ecx,[esp+14h]
+		a.Call(StrDtor);
+		a.Raw(0x8B, 0x44, 0x24, 0x0C);                    // mov eax,[esp+0Ch]
+		a.Raw(0x85, 0xC0);                                // test eax,eax
+		int jzMissing = a.Bytes.Count + 2;
+		a.Raw(0x0F, 0x84, 0, 0, 0, 0);                    // jz next                  (panel missing)
+		uint jzMissingNext = a.Here;
+		a.Raw(0x8D, 0x8E, 0x64, 0x01, 0x00, 0x00);        // lea ecx,[esi+164h]       (panel list)
+		a.Raw(0x8D, 0x44, 0x24, 0x0C);                    // lea eax,[esp+0Ch]
+		a.Raw(0x50);                                      // push eax
+		a.Call(PushBack);
+		uint pop1; int idx1 = EmitStrAddr(a, out pop1);   // eax = &"button_kick"
+		kickRefs.Add(new KeyValuePair<int, uint>(idx1, pop1));
+		a.Raw(0x50);                                      // push eax
+		a.Raw(0x8D, 0x4C, 0x24, 0x18);                    // lea ecx,[esp+18h]        (temp string, +4 for the push)
+		a.Call(StrCtor);
+		a.Raw(0x8B, 0x4C, 0x24, 0x0C);                    // mov ecx,[esp+0Ch]        (search inside this panel)
+		a.Raw(0x8D, 0x44, 0x24, 0x14);                    // lea eax,[esp+14h]
+		a.Raw(0x50);                                      // push eax
+		a.Call(FindChild);
+		a.Raw(0x8B, 0xF8);                                // mov edi,eax              (kick button)
+		a.Raw(0x8D, 0x4C, 0x24, 0x14);                    // lea ecx,[esp+14h]
+		a.Call(StrDtor);
+		a.Raw(0x85, 0xFF);                                // test edi,edi
+		int jzNoKick = a.Bytes.Count + 1;
+		a.Raw(0x74, 0x00);                                // jz next
+		uint jzNoKickNext = a.Here;
+		a.Raw(0x8B, 0x8F, 0x18, 0x03, 0x00, 0x00);        // mov ecx,[edi+318h]       (button handler object)
+		a.Raw(0x85, 0xC9);                                // test ecx,ecx
+		int jzNoHandler = a.Bytes.Count + 1;
+		a.Raw(0x74, 0x00);                                // jz next
+		uint jzNoHandlerNext = a.Here;
+		a.Raw(0x83, 0xC1, 0x14);                          // add ecx,14h              (same adjustment init uses)
+		a.Raw(0x8D, 0x46, 0x2C);                          // lea eax,[esi+2Ch]        (lobby's listener interface)
+		a.Raw(0x50);                                      // push eax
+		a.Call(AddListener);
+		uint nextAt = a.Here;
+		a.Raw(0x83, 0xC3, 0x0E);                          // add ebx,14               (next name)
+		a.Raw(0x80, 0x3B, 0x00);                          // cmp byte ptr [ebx],0
+		int jnzLoop = a.Bytes.Count + 2;
+		a.Raw(0x0F, 0x85, 0, 0, 0, 0);                    // jnz loop
+		uint jnzLoopNext = a.Here;
+		a.Jmp(ResumeAt);
+		uint namesAt = a.Here;
+		foreach (var name in PanelNames) { a.Bytes.AddRange(Encoding.ASCII.GetBytes(name)); a.Raw(0x00); }
+		a.Raw(0x00);
+		FixImm32(a, namesIdx, namesAt - popNames);
+		FixRel32(a, jzMissing, jzMissingNext, nextAt);
+		FixRel8(a, jzNoKick, jzNoKickNext, nextAt);
+		FixRel8(a, jzNoHandler, jzNoHandlerNext, nextAt);
+		FixRel32(a, jnzLoop, jnzLoopNext, loopAt);
+
+		// --- click handler: kick the player whose panel owns the clicked kick button ---------------------------
+		// entry state: ebp = lobby+2Ch, frame = 10h saves + 30h locals, [esp+44h] = message, [message] = component
+		handlerAt = a.Here;
+		a.Raw(0x8B, 0x7C, 0x24, 0x44);                    // mov edi,[esp+44h]
+		a.Raw(0x8B, 0x3F);                                // mov edi,[edi]            (clicked component)
+		a.Raw(0xBE, 0x01, 0x00, 0x00, 0x00);              // mov esi,1                (panel 1 = host, never kicked)
+		uint hLoop = a.Here;
+		a.Raw(0x3B, 0xB5, 0x3C, 0x01, 0x00, 0x00);        // cmp esi,[ebp+13Ch]       (panel count)
+		int jaeDone = a.Bytes.Count + 2;
+		a.Raw(0x0F, 0x83, 0, 0, 0, 0);                    // jae done
+		uint jaeDoneNext = a.Here;
+		a.Raw(0x83, 0xEC, 0x10);                          // sub esp,10h              (temp string)
+		uint pop2; int idx2 = EmitStrAddr(a, out pop2);
+		kickRefs.Add(new KeyValuePair<int, uint>(idx2, pop2));
+		a.Raw(0x50);                                      // push eax
+		a.Raw(0x8D, 0x4C, 0x24, 0x04);                    // lea ecx,[esp+4]
+		a.Call(StrCtor);
+		a.Raw(0x8B, 0x85, 0x40, 0x01, 0x00, 0x00);        // mov eax,[ebp+140h]       (panel list data)
+		a.Raw(0x8B, 0x0C, 0xB0);                          // mov ecx,[eax+esi*4]      (panel i)
+		a.Raw(0x54);                                      // push esp                 (&temp)
+		a.Call(FindChild);
+		a.Raw(0x8B, 0xD8);                                // mov ebx,eax
+		a.Raw(0x8B, 0xCC);                                // mov ecx,esp
+		a.Call(StrDtor);
+		a.Raw(0x83, 0xC4, 0x10);                          // add esp,10h
+		a.Raw(0x3B, 0xDF);                                // cmp ebx,edi
+		int jeKick = a.Bytes.Count + 1;
+		a.Raw(0x74, 0x00);                                // je kick
+		uint jeKickNext = a.Here;
+		a.Raw(0x46);                                      // inc esi
+		int jmpLoop = a.Bytes.Count + 1;
+		a.Raw(0xEB, 0x00);                                // jmp loop
+		uint jmpLoopNext = a.Here;
+		uint kickAt = a.Here;
+		a.Raw(0x8B, 0x4D, 0x5C);                          // mov ecx,[ebp+5Ch]        (session)
+		a.Raw(0x8B, 0x89, 0xF0, 0x96, 0x05, 0x00);        // mov ecx,[ecx+596F0h]
+		a.Raw(0x8B, 0x11);                                // mov edx,[ecx]
+		a.Raw(0x56);                                      // push esi                 (slot = panel index)
+		a.Raw(0xFF, 0x52, 0x68);                          // call [edx+68h]           (kick)
+		uint doneAt = a.Here;
+		a.Jmp(KickResume);
+		FixRel32(a, jaeDone, jaeDoneNext, doneAt);
+		FixRel8(a, jeKick, jeKickNext, kickAt);
+		FixRel8(a, jmpLoop, jmpLoopNext, hLoop);
+
+		// --- per-member update: show the kick button inside that member's own panel ---------------------------
+		// entry state: edi = lobby+54h, ebx = member slot; original code would set esi = root
+		showAt = a.Here;
+		a.Raw(0x8B, 0x77, 0xB0);                          // mov esi,[edi-50h]        (root, as before)
+		a.Raw(0x3B, 0x9F, 0x14, 0x01, 0x00, 0x00);        // cmp ebx,[edi+114h]       (slot < panel count?)
+		int jaeRoot = a.Bytes.Count + 1;
+		a.Raw(0x73, 0x00);                                // jae keep root
+		uint jaeRootNext = a.Here;
+		a.Raw(0x8B, 0x87, 0x18, 0x01, 0x00, 0x00);        // mov eax,[edi+118h]       (panel list data)
+		a.Raw(0x8B, 0x34, 0x98);                          // mov esi,[eax+ebx*4]      (that member's panel)
+		uint keepAt = a.Here;
+		a.Raw(0x8D, 0x4C, 0x24, 0x34);                    // lea ecx,[esp+34h]        (replaced instruction)
+		a.Jmp(ShowResume);
+		FixRel8(a, jaeRoot, jaeRootNext, keepAt);
+
+		// shared string
+		uint kickStrAt = a.Here;
+		a.Bytes.AddRange(Encoding.ASCII.GetBytes("button_kick")); a.Raw(0x00);
+		foreach (var r in kickRefs) FixImm32(a, r.Key, kickStrAt - r.Value);
+	}
+
+	public static string Build(string inPath, string outPath) { return Build(inPath, outPath, true); }
+
+	public static string Build(string inPath, string outPath, bool kickFix) {
+		return BuildVersion(inPath, outPath, kickFix, true);
+	}
+
+	static string BuildVersion(string inPath, string outPath, bool kickFix, bool capacityFix) {
+		b = File.ReadAllBytes(inPath);
+		string inHash = Sha(b);
+		if (inHash != OriginalSha256) throw new Exception("input is not the expected empire.retail.dll build (sha256 " + inHash + ")");
+
+		peOff = BitConverter.ToInt32(b, 0x3C);
+		nSec = BitConverter.ToUInt16(b, peOff + 6);
+		secTable = peOff + 24 + BitConverter.ToUInt16(b, peOff + 20);
+		if (Encoding.ASCII.GetString(b, secTable, 5) != ".text") throw new Exception("first section is not .text");
+
+		// --- make the unused file tail of .text part of the loaded section -------------------------
+		uint textRva = BitConverter.ToUInt32(b, secTable + 12);
+		uint textVs = BitConverter.ToUInt32(b, secTable + 8);
+		uint textRaw = BitConverter.ToUInt32(b, secTable + 16);
+		uint nextRva = BitConverter.ToUInt32(b, secTable + 40 + 12);
+		if (textRaw <= textVs || textRva + textRaw > nextRva) throw new Exception("no usable slack after .text");
+		uint caveVa = (ImageBase + textRva + textVs + 15) & ~15u;   // 16-byte aligned start inside the slack
+
+		// --- check the original bytes at the hook: E8 rel32 -> StrCtor ---------------------------------
+		int hookOff = VaToOff(HookAt);
+		int origRel = BitConverter.ToInt32(b, hookOff + 1);
+		if (b[hookOff] != 0xE8 || (uint)(HookAt + 5 + origRel) != StrCtor) throw new Exception("unexpected bytes at hook site");
+
+		// --- cave code ---------------------------------------------------------------------------------
+		var a = new Asm { Va = caveVa };
+		// finish the panel_player2 lookup exactly as the original code did
+		a.Call(StrCtor);                                  // ecx = temp string, arg "panel_player2" already pushed
+		a.Raw(0x8D, 0x44, 0x24, 0x14);                    // lea eax,[esp+14h]
+		a.Raw(0x8B, 0xCF);                                // mov ecx,edi            (edi = root component)
+		a.Raw(0x50);                                      // push eax
+		a.Call(FindChild);
+		a.Raw(0x89, 0x44, 0x24, 0x0C);                    // mov [esp+0Ch],eax
+		a.Raw(0x8D, 0x8E, 0x64, 0x01, 0x00, 0x00);        // lea ecx,[esi+164h]     (panel list)
+		a.Raw(0x8D, 0x44, 0x24, 0x0C);                    // lea eax,[esp+0Ch]
+		a.Raw(0x50);                                      // push eax
+		a.Call(PushBack);
+		a.Raw(0x8D, 0x4C, 0x24, 0x14);                    // lea ecx,[esp+14h]
+		a.Call(StrDtor);
+		uint handlerAt = 0, showAt = 0;
+		if (kickFix) EmitStage2(a, out handlerAt, out showAt);
+		else {
+		// panels 3..8: ebx walks a NUL-separated name list stored right after the code
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint popAt = a.Here;
+		a.Raw(0x5B);                                      // pop ebx                (ebx = popAt; ebx is saved by the prologue)
+		int addImmIndex = a.Bytes.Count + 2;
+		a.Raw(0x83, 0xC3, 0x00);                          // add ebx, names - popAt (filled below)
+		uint loopAt = a.Here;
+		a.Raw(0x8B, 0x7E, 0x04);                          // mov edi,[esi+4]
+		a.Raw(0x8D, 0x4C, 0x24, 0x14);                    // lea ecx,[esp+14h]
+		a.Raw(0x53);                                      // push ebx               (name)
+		a.Call(StrCtor);
+		a.Raw(0x8D, 0x44, 0x24, 0x14);                    // lea eax,[esp+14h]
+		a.Raw(0x8B, 0xCF);                                // mov ecx,edi
+		a.Raw(0x50);                                      // push eax
+		a.Call(FindChild);
+		a.Raw(0x89, 0x44, 0x24, 0x0C);                    // mov [esp+0Ch],eax
+		a.Raw(0x85, 0xC0);                                // test eax,eax
+		int jzIndex = a.Bytes.Count + 1;
+		a.Raw(0x74, 0x00);                                // jz skip                (panel missing: don't add it)
+		uint jzNext = a.Here;
+		a.Raw(0x8D, 0x8E, 0x64, 0x01, 0x00, 0x00);        // lea ecx,[esi+164h]
+		a.Raw(0x8D, 0x44, 0x24, 0x0C);                    // lea eax,[esp+0Ch]
+		a.Raw(0x50);                                      // push eax
+		a.Call(PushBack);
+		uint skipAt = a.Here;
+		a.Raw(0x8D, 0x4C, 0x24, 0x14);                    // skip: lea ecx,[esp+14h]
+		a.Call(StrDtor);
+		a.Raw(0x83, 0xC3, 0x0E);                          // add ebx,14             (next name; each is 13 chars + NUL)
+		a.Raw(0x80, 0x3B, 0x00);                          // cmp byte ptr [ebx],0
+		int jnzIndex = a.Bytes.Count + 1;
+		a.Raw(0x75, 0x00);                                // jnz loop
+		uint jnzNext = a.Here;
+		a.Jmp(ResumeAt);
+		uint namesAt = a.Here;
+		foreach (var name in PanelNames) {
+			if (name.Length != 13) throw new Exception("name length must be 13");
+			a.Bytes.AddRange(Encoding.ASCII.GetBytes(name)); a.Raw(0x00);
+		}
+		a.Raw(0x00);                                      // end of list
+
+		// fill in the short displacements (imm8 of 'add ebx' is sign-extended, so it must stay <= 127)
+		if (namesAt - popAt > 127) throw new Exception("name list too far from pop for an imm8");
+		a.Bytes[addImmIndex] = (byte)(namesAt - popAt);
+		a.Bytes[jzIndex] = checked((byte)(skipAt - jzNext));
+		a.Bytes[jnzIndex] = unchecked((byte)(sbyte)checked((int)loopAt - (int)jnzNext));
+		}
+
+		uint caveEnd = caveVa + (uint)a.Bytes.Count;
+		if (caveEnd > ImageBase + textRva + textRaw) throw new Exception("cave does not fit in .text slack");
+
+		// --- apply --------------------------------------------------------------------------------------
+		int caveOff = (int)(BitConverter.ToUInt32(b, secTable + 20) + (caveVa - ImageBase - textRva));
+		for (int i = 0; i < a.Bytes.Count; i++) {
+			if (b[caveOff + i] != 0) throw new Exception("slack is not empty at " + (caveVa + i).ToString("X8"));
+			b[caveOff + i] = a.Bytes[i];
+		}
+		// grow .text's in-memory size to cover the cave (still below the next section)
+		uint newVs = caveEnd - ImageBase - textRva;
+		Array.Copy(BitConverter.GetBytes(newVs), 0, b, secTable + 8, 4);
+		// hook: CALL StrCtor -> JMP cave (same 5 bytes)
+		b[hookOff] = 0xE9;
+		Array.Copy(BitConverter.GetBytes((int)(caveVa - (HookAt + 5))), 0, b, hookOff + 1, 4);
+		if (kickFix) {
+			// click handler: mov edx,[ebp+130h] -> jmp handler detour
+			ExpectBytes(KickHookAt, 0x8B, 0x95, 0x30, 0x01, 0x00, 0x00);
+			PutJmp(KickHookAt, handlerAt, 6);
+			// per-member update: mov esi,[edi-50h] / lea ecx,[esp+34h] -> jmp show detour
+			ExpectBytes(ShowHookAt, 0x8B, 0x77, 0xB0, 0x8D, 0x4C, 0x24, 0x34);
+			PutJmp(ShowHookAt, showAt, 7);
+		}
+
+		if (capacityFix) {
+			// The native host_campaign screen does NOT call Lua MPHostCampaign (11059200).
+			// Its own settings ctor at 10FD2848 receives (players=2, spectators=0, sides=2).
+			// Change only the player-count argument: push 2 / push 0 / push 2 -> ... / push 8.
+			ExpectBytes(0x10FD283B, 0x6A, 0x02, 0x6A, 0x00, 0x6A, 0x02);
+			b[VaToOff(0x10FD2840)] = (byte)MaxPlayers;
+		}
+
+		// --- engine fixes in the new section ----------------------------------------------------------
+		var s = new Asm { Va = NewSectionVa() };
+		uint allyAt = EmitAllyResultFix(s);
+		ExpectBytes(AllyHookAt, 0x33, 0xC0, 0x38, 0x44, 0x24, 0x1C, 0x0F, 0x94, 0xC0, 0x89, 0x43, 0x04);
+		PutJmp(AllyHookAt, allyAt, 12);
+		uint giftAt = EmitGiftPartnerPicker(s);
+		RedirectCall(GiftPickCall, 0x110DE560, giftAt);
+		ReserveDataDword(GiftCounterVa);
+		uint resyncAt = EmitAutoResync(s);
+		RedirectCall(ResyncNotifyCall, NotifyListeners, resyncAt);
+		uint inviteAt = EmitInviteWiring(s);
+		ExpectBytes(InviteWireAt, 0x8B, 0x73, 0x04, 0x8D, 0x4C, 0x24, 0x20);
+		PutJmp(InviteWireAt, inviteAt, 7);
+		ExpectBytes(SaveScreenLocaleCategory, 0x6A, 0x00, 0xE8);
+		b[VaToOff(SaveScreenLocaleCategory) + 1] = 5;
+		uint framePinAt = EmitFramePin(s);
+		RedirectCall(FrameUpdateCall, MultiplayerUpdate, framePinAt);
+		uint tickPinAt = EmitBattleTickPin(s);
+		ExpectBytes(BattleTickAt, 0xFF, 0x74, 0x24, 0x08, 0x8B, 0x4C, 0x24, 0x10);
+		PutJmp(BattleTickAt, tickPinAt, 8);
+		uint noKickAt = EmitBattleNoKick(s);
+		ExpectBytes(DesyncKickAt, 0x8B, 0x8F, 0x74, 0xBE, 0x02, 0x00);
+		PutJmp(DesyncKickAt, noKickAt, 6);
+		uint reportNoKickAt = EmitReportNoKick(s);
+		ExpectBytes(ReportKickAt, 0x55, 0x57, 0x8D, 0x44, 0x24, 0x10);
+		PutJmp(ReportKickAt, reportNoKickAt, 6);
+		uint forcedAt = EmitForcedResyncAnswer(s);
+		RedirectCall(ResyncAnswerCall, ResyncAnswer, forcedAt);
+		ReserveDataDword(ResyncKeyPrevVa);
+		AddSection(".s2mp", s.Bytes);
+
+		File.WriteAllBytes(outPath, b);
+		return string.Format("patched{7}: hook {0:X8} -> cave {1:X8}..{2:X8} ({3} bytes), .text VirtualSize {4:X8} -> {5:X8}; output sha256 {6}",
+			HookAt, caveVa, caveEnd, a.Bytes.Count, textVs, newVs, Sha(b),
+			kickFix ? string.Format(" (+kick fix: handler {0:X8}, show {1:X8})", handlerAt, showAt) : "");
+	}
+}
