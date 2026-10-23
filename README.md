@@ -70,9 +70,18 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 11. Load a 3+ player save: the Load screen lists every player.
 12. On the campaign map the host presses Ctrl+Shift+F9: the resync popup appears for everyone and the game carries on afterwards.
 
-## Known issue: head-to-head with 3+ players
-Reported with the 4-player mod and not fixed yet: in a **head-to-head** campaign with 3 or more players, when two players fight each other the player who isn't in the battle can crash to desktop (sieges are reported to work). Until it's fixed, **auto-resolve battles between two human players** in head-to-head games with 3+ players, or play co-op. If it happens to you, send `eightplayer_crash.txt` from the game folder of the player who crashed.
+## Known issues - bug reports wanted
+**Head-to-head with 3 or more players:** when two players fight each other, the player who isn't in the battle can crash to desktop (sieges are reported to work). It also happens with the 4-player mod, so it's in the game itself, and it can't be reproduced without a 3-player game.
 
+**Until it's fixed:** auto-resolve battles between two human players in head-to-head games with 3+ players, or play co-op.
+
+**Please send bug reports: more of them are needed to map out this problem.** [Open an issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md) or comment on the Steam Workshop page, and include:
+- **`eightplayer_crash.txt`** from the game folder of the player who crashed (Steam > right-click the game > Manage > Browse local files). This is the most useful part: it shows exactly where the game broke.
+- How many players, and which one crashed (host or not, in the battle or watching).
+- The campaign (Shogun 2, Rise of the Samurai or Fall of the Samurai) and clans.
+- The battle: field battle, siege, naval, or reinforcements joining.
+- When it crashed: when the battle was announced, while choosing attack/spectate, on the loading screen, or during the battle.
+- Your MATCH CODE, and any other mods enabled.
 ## Not done yet
 - **Battle desyncs** no longer drop anyone, but the battle itself can't be resynced: the out-of-sync player's view may differ until the campaign map, where the host's state wins.
 - Two known causes are fixed (above); others may remain. Possible: Intel and AMD CPUs can give slightly different
