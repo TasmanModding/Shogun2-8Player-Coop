@@ -184,9 +184,152 @@ public static class EightPlayerPatcher {
 		a.Raw(0x83, 0xC4, 0x04);                          // add esp,4
 	}
 
+	// ---- crash reporter ----------------------------------------------------------------------------------
+	// The game builds a Crash.dmp path at start-up but never installs a handler, so a crash leaves no trace.
+	// This installs an unhandled-exception filter (once, from the frame hook) that writes eightplayer_crash.txt
+	// to the game's working folder: exception code and address, this DLL's base (to turn addresses into the
+	// offsets in NOTES.md), registers and the top 64 stack dwords. Then it hands over to the previous filter.
+	const uint SetUnhandledExceptionFilterIat = 0x115A10F4;
+	const uint CreateFileAIat = 0x115A11A4;
+	const uint WriteFileIat = 0x115A1154;
+	const uint CloseHandleIat = 0x115A1158;
+	const uint CrashPrevFilterVa = 0x11CB1538;   // previous filter (third reserved .data dword)
+	const uint CrashInstalledVa = 0x11CB153C;    // filter installed (fourth)
+	public const string Version = "1.5";
+	static uint crashFilterAt;
+
+	static void Imm(Asm a, uint v) { a.Bytes.AddRange(BitConverter.GetBytes(v)); }
+
+	static void EmitCrashFilter(Asm a) {
+		var str = new Dictionary<string, uint>();
+		Action<string, string> addStr = (key, text) => { str[key] = a.Here; a.Bytes.AddRange(Encoding.ASCII.GetBytes(text)); a.Raw(0); };
+		addStr("head", "Shogun 2 8-player co-op mod v" + Version + " crash report\r\nexception ");
+		addStr("at", " at ");
+		addStr("base", "  empire.retail.dll base ");
+		var regs = new[] { "eip", "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp" };
+		var regOff = new uint[] { 0xB8, 0xB0, 0xA4, 0xAC, 0xA8, 0xA0, 0x9C, 0xB4, 0xC4 };
+		foreach (var r in regs) addStr(r, (r == "eip" ? "\r\n" : " ") + r + " ");
+		addStr("stack", "\r\nstack:");
+		addStr("nl", "\r\n");
+		addStr("sp", " ");
+		addStr("file", "eightplayer_crash.txt");
+
+		// hex8: eax -> 8 hex digits at [edi], edi advanced; keeps ecx/edx
+		uint hex8 = a.Here;
+		a.Raw(0x51, 0x52, 0xB9, 0x08, 0x00, 0x00, 0x00);  // push ecx / push edx / mov ecx,8
+		a.Mark("hx");
+		a.Raw(0xC1, 0xC0, 0x04);                          // rol eax,4
+		a.Raw(0x8B, 0xD0, 0x83, 0xE2, 0x0F);              // mov edx,eax / and edx,0Fh
+		a.Raw(0x80, 0xFA, 0x0A);                          // cmp dl,10
+		a.J8(0x72, "dig");                                // jb dig
+		a.Raw(0x80, 0xC2, 0x07);                          // add dl,7
+		a.Mark("dig");
+		a.Raw(0x80, 0xC2, 0x30, 0x88, 0x17, 0x47);        // add dl,'0' / mov [edi],dl / inc edi
+		a.Raw(0x49);                                      // dec ecx
+		a.J8(0x75, "hx");                                 // jnz hx
+		a.Raw(0x5A, 0x59, 0xC3);                          // pop edx / pop ecx / ret
+		// puts: copy the C string at esi to [edi]; keeps ecx/edx
+		uint puts = a.Here;
+		a.Mark("pc");
+		a.Raw(0x8A, 0x06, 0x46, 0x84, 0xC0);              // mov al,[esi] / inc esi / test al,al
+		a.J8(0x74, "pd");                                 // jz pd
+		a.Raw(0x88, 0x07, 0x47);                          // mov [edi],al / inc edi
+		a.J8(0xEB, "pc");                                 // jmp pc
+		a.Mark("pd");
+		a.Raw(0xC3);
+		a.Resolve();
+
+		// LONG WINAPI filter(EXCEPTION_POINTERS* ep)
+		crashFilterAt = a.Here;
+		a.Raw(0x55, 0x8B, 0xEC);                          // push ebp / mov ebp,esp
+		a.Raw(0x81, 0xEC, 0x10, 0x10, 0x00, 0x00);        // sub esp,1010h  (text buffer [ebp-1000h], locals below)
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint popAt = a.Here;
+		a.Raw(0x5B);                                      // pop ebx
+		a.Raw(0x8D, 0xBD, 0x00, 0xF0, 0xFF, 0xFF);        // lea edi,[ebp-1000h]
+		Action<string> puts1 = key => { a.Raw(0x8D, 0xB3); Imm(a, str[key] - popAt); a.Call(puts); };   // lea esi,[ebx+s] / call puts
+		Action ep = () => a.Raw(0x8B, 0x45, 0x08);       // mov eax,[ebp+8]
+		puts1("head");
+		ep(); a.Raw(0x8B, 0x00, 0x8B, 0x00); a.Call(hex8);                    // ExceptionRecord->ExceptionCode
+		puts1("at");
+		ep(); a.Raw(0x8B, 0x00, 0x8B, 0x40, 0x0C); a.Call(hex8);              // ->ExceptionAddress
+		puts1("base");
+		a.Raw(0x8B, 0xC3, 0x2D); Imm(a, popAt - ImageBase); a.Call(hex8);     // mov eax,ebx / sub eax,(popAt - image base)
+		for (int i = 0; i < regs.Length; i++) {
+			puts1(regs[i]);
+			ep(); a.Raw(0x8B, 0x40, 0x04, 0x8B, 0x80); Imm(a, regOff[i]); a.Call(hex8);   // ContextRecord->reg
+		}
+		puts1("stack");
+		ep(); a.Raw(0x8B, 0x40, 0x04, 0x8B, 0x90, 0xC4, 0x00, 0x00, 0x00);    // mov edx,[ctx+0C4h] (Esp)
+		a.Raw(0x33, 0xC9);                                // xor ecx,ecx
+		a.Mark("row");
+		a.Raw(0xF6, 0xC1, 0x07);                          // test cl,7
+		a.J8(0x75, "space");                              // jnz space
+		puts1("nl");
+		a.J8(0xEB, "word");
+		a.Mark("space");
+		puts1("sp");
+		a.Mark("word");
+		a.Raw(0x8B, 0x04, 0x8A); a.Call(hex8);            // mov eax,[edx+ecx*4]
+		a.Raw(0x41, 0x83, 0xF9, 0x40);                    // inc ecx / cmp ecx,64
+		a.J8(0x72, "row");                                // jb row
+		puts1("nl");
+		// write the file
+		a.Raw(0x8D, 0x85, 0x00, 0xF0, 0xFF, 0xFF);        // lea eax,[ebp-1000h]
+		a.Raw(0x2B, 0xF8, 0x89, 0xBD, 0xFC, 0xEF, 0xFF, 0xFF);   // sub edi,eax / mov [ebp-1004h],edi (length)
+		a.Raw(0x6A, 0x00, 0x68, 0x80, 0x00, 0x00, 0x00, 0x6A, 0x02, 0x6A, 0x00, 0x6A, 0x01);   // 0, NORMAL, CREATE_ALWAYS, 0, SHARE_READ
+		a.Raw(0x68, 0x00, 0x00, 0x00, 0x40);              // push GENERIC_WRITE
+		a.Raw(0x8D, 0xB3); Imm(a, str["file"] - popAt); a.Raw(0x56);   // lea esi,[ebx+file] / push esi
+		a.Raw(0x8B, 0x83); Imm(a, CreateFileAIat - popAt); a.Raw(0xFF, 0xD0);   // call [CreateFileA]
+		a.Raw(0x83, 0xF8, 0xFF);                          // cmp eax,-1
+		a.J8(0x74, "nofile");
+		a.Raw(0x8B, 0xF0);                                // mov esi,eax
+		a.Raw(0x6A, 0x00);                                // push 0 (overlapped)
+		a.Raw(0x8D, 0x8D, 0xF8, 0xEF, 0xFF, 0xFF, 0x51);  // lea ecx,[ebp-1008h] / push ecx (written)
+		a.Raw(0xFF, 0xB5, 0xFC, 0xEF, 0xFF, 0xFF);        // push [ebp-1004h] (length)
+		a.Raw(0x8D, 0x8D, 0x00, 0xF0, 0xFF, 0xFF, 0x51);  // lea ecx,[ebp-1000h] / push ecx
+		a.Raw(0x56);                                      // push esi
+		a.Raw(0x8B, 0x83); Imm(a, WriteFileIat - popAt); a.Raw(0xFF, 0xD0);
+		a.Raw(0x56);
+		a.Raw(0x8B, 0x83); Imm(a, CloseHandleIat - popAt); a.Raw(0xFF, 0xD0);
+		a.Mark("nofile");
+		// hand over to the previous filter (Steam's crash reporter, Windows)
+		a.Raw(0xC7, 0x85, 0xF4, 0xEF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00);   // mov dword [ebp-100Ch],0
+		a.Raw(0x8B, 0x83); Imm(a, CrashPrevFilterVa - popAt);                // mov eax,[prev]
+		a.Raw(0x85, 0xC0);
+		a.J8(0x74, "fin");
+		a.Raw(0xFF, 0x75, 0x08, 0xFF, 0xD0);              // push [ebp+8] / call eax
+		a.Raw(0x89, 0x85, 0xF4, 0xEF, 0xFF, 0xFF);        // mov [ebp-100Ch],eax
+		a.Mark("fin");
+		a.Raw(0x61);                                      // popad
+		a.Raw(0x8B, 0x85, 0xF4, 0xEF, 0xFF, 0xFF);        // mov eax,[ebp-100Ch]
+		a.Raw(0x8B, 0xE5, 0x5D, 0xC2, 0x04, 0x00);        // mov esp,ebp / pop ebp / ret 4
+		a.Resolve();
+	}
+
+	// once, from the frame hook: SetUnhandledExceptionFilter(crash filter), remembering the previous one
+	static void EmitCrashFilterInstall(Asm a) {
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint popAt = a.Here;
+		a.Raw(0x5B);                                      // pop ebx
+		a.Raw(0x83, 0xBB); Imm(a, CrashInstalledVa - popAt); a.Raw(0x00);   // cmp dword [installed],0
+		a.J8(0x75, "done");
+		a.Raw(0xC7, 0x83); Imm(a, CrashInstalledVa - popAt); Imm(a, 1);     // mov dword [installed],1
+		a.Raw(0x8D, 0x83); Imm(a, crashFilterAt - popAt); a.Raw(0x50);      // lea eax,[filter] / push eax
+		a.Raw(0x8B, 0x83); Imm(a, SetUnhandledExceptionFilterIat - popAt); a.Raw(0xFF, 0xD0);
+		a.Raw(0x89, 0x83); Imm(a, CrashPrevFilterVa - popAt);               // mov [prev],eax
+		a.Mark("done");
+		a.Raw(0x61);                                      // popad
+		a.Resolve();
+	}
+
 	static uint EmitFramePin(Asm a) {
 		// replaces "call FUN_10f36680" (ecx = its this): pin, then tail-call the original
+		EmitCrashFilter(a);
 		uint at = a.Here;
+		EmitCrashFilterInstall(a);
 		EmitResyncKeyPoll(a);
 		EmitPinFloatModes(a);
 		a.Jmp(MultiplayerUpdate);
@@ -904,6 +1047,8 @@ public static class EightPlayerPatcher {
 		uint forcedAt = EmitForcedResyncAnswer(s);
 		RedirectCall(ResyncAnswerCall, ResyncAnswer, forcedAt);
 		ReserveDataDword(ResyncKeyPrevVa);
+		ReserveDataDword(CrashPrevFilterVa);
+		ReserveDataDword(CrashInstalledVa);
 		AddSection(".s2mp", s.Bytes);
 
 		File.WriteAllBytes(outPath, b);

@@ -17,6 +17,7 @@ Tools: Ghidra 12.1.4 headless (`re/ghidra_proj`; `re/q.ps1` runs `re/query.txt` 
 | Pin x87 CW 027F + MXCSR 1F80 | 100B190C call retarget (frame), 10227D40 (8 bytes, battle tick) jmp | `.s2mp` + 253, + 272 |
 | No desync kick during battles (campaign unchanged) | 10EE9A71 (6 bytes, edi = session+4, test [edi+596CCh]), 10EF9A87 (6 bytes, ebx = session, test [ebx+596D0h]) jmp | `.s2mp` + 299, + 2B6 |
 | Host resync key Ctrl+Shift+F9 (frame hook polls GetAsyncKeyState via IAT 115A1558, prev-state dword 11CB1534); 0xAC value 2 = force | frame hook + 10F10E2D call retarget (FUN_10efa140) | `.s2mp` frame stub, forced-answer stub |
+| Crash reporter: SetUnhandledExceptionFilter once from the frame hook; writes eightplayer_crash.txt (code, address, DLL base, regs, 64 stack dwords), then chains to the previous filter; prev/installed dwords 11CB1538/11CB153C | frame hook | `.s2mp` before the frame stub |
 | Invite buttons on slots 3..8 (frames invite_frame3..8) | 10FD5B70 (7 bytes) jmp; original wires only root.FindChild("button_invite") at 10FD5B36 | `.s2mp` + 13F |
 
 `.s2mp` is a new RX section appended after `.reloc` (one free header slot existed). Its code uses only relative
@@ -92,6 +93,14 @@ calls/jumps, and no relocation covers a patched byte (`verify_load.ps1` checks u
 ### Forum-reported triggers (Steam / GameFAQs)
 Acting during another player's turn; mismatched mods or DirectX; naval battles and auto-resolve; diplomacy prompts;
 long campaigns; both players saving. No official root cause is known.
+
+### Head-to-head with 3+ players (open)
+- Reported (4-player mod, FotS H2H, no other mods): when two humans fight, the human not in the battle crashes to desktop; sieges work.
+- Pre-battle panel FUN_111853c0 picks a handler by role: [+74h] / [+70h] = the two sides, [+78h] = third party (FUN_11167480:
+  button_spectate_battle -> vfunc 74h, button_play_as_ai -> 78h, button_autoresolve -> 3Ch). In 2-player games the third-party
+  role only ever went to an ally; in H2H with 3+ players it goes to someone allied to nobody. Prime suspect.
+- None of this mod's hooks run on that path (only the FP pin). The game's own Crash.dmp path (1000AFE0 -> 117C7950) is built but
+  never used, hence the mod's crash reporter.
 
 ## Next steps
 - Get logs from a real desync (players' `logs` folder; enabling `mp_network_sync_logging` for everyone gives tick-level logs)
