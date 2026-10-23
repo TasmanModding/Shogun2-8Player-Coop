@@ -18,6 +18,9 @@ Tools: Ghidra 12.1.4 headless (`re/ghidra_proj`; `re/q.ps1` runs `re/query.txt` 
 | No desync kick during battles (campaign unchanged) | 10EE9A71 (6 bytes, edi = session+4, test [edi+596CCh]), 10EF9A87 (6 bytes, ebx = session, test [ebx+596D0h]) jmp | `.s2mp` + 299, + 2B6 |
 | Host resync key Ctrl+Shift+F9 (frame hook polls GetAsyncKeyState via IAT 115A1558, prev-state dword 11CB1534); 0xAC value 2 = force | frame hook + 10F10E2D call retarget (FUN_10efa140) | `.s2mp` frame stub, forced-answer stub |
 | Crash reporter: SetUnhandledExceptionFilter once from the frame hook; writes eightplayer_crash.txt (code, address, DLL base, regs, 64 stack dwords), then chains to the previous filter; prev/installed dwords 11CB1538/11CB153C | frame hook | `.s2mp` before the frame stub |
+| Lobby title "(N/8)": FUN_10fd6650 entry (member update; [ecx-50h] root, [ecx+34h] session), count FUN_10f0eb00(session+58EF4h), text via FUN_100ed420 + SetText FUN_10f9d010 | 10FD6650 (6 bytes) jmp | `.s2mp` |
+| Load screen players 3..8: after portrait_player2 in FUN_10fc8dd0; header count [h+30h], you [h+31h], names [h+3Ch], clan keys [h+48h] (0Ch each); clan name via [[11BC095C]+18h]->4Ch, +10h -> FUN_10bce670 -> FUN_10308d20(key), [[..+10h]+D38h]->8(rec+28h,1) | 10FC93B7 (5 bytes) jmp; layout build_load_layout.ps1 | `.s2mp` |
+| Co-op team: FUN_1068e0e0 adds clans whose human record [clan+6D8h] has campaign type [rec+74h] 5/6 (FUN_105cb5b0); a non-co-op human record gets the co-op type when another human's is co-op | 1068E124 call retarget | `.s2mp` |
 | Invite buttons on slots 3..8 (frames invite_frame3..8) | 10FD5B70 (7 bytes) jmp; original wires only root.FindChild("button_invite") at 10FD5B36 | `.s2mp` + 13F |
 
 `.s2mp` is a new RX section appended after `.reloc` (one free header slot existed). Its code uses only relative
@@ -105,5 +108,5 @@ long campaigns; both players saving. No official root cause is known.
 ## Next steps
 - Get logs from a real desync (players' `logs` folder; enabling `mp_network_sync_logging` for everyone gives tick-level logs)
   to find which state drifts.
-- Co-op alliances for players 3..8 at campaign start (where campaign_type_co_op allies human factions: FUN_106a3a30 area).
-- MP save list / save name for more than 2 players.
+- Save NAME (FUN_106a3a30: "%S (%S) vs. %S (%S)") still names two players.
+- Lobby victory conditions are game-wide (FUN_10fc4ba0 fills the first victory_conditions box from the campaign type), so players 3..8 need no box of their own.

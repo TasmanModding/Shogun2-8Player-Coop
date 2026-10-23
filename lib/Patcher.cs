@@ -184,6 +184,229 @@ public static class EightPlayerPatcher {
 		a.Raw(0x83, 0xC4, 0x04);                          // add esp,4
 	}
 
+	// ---- player count in the lobby title ----------------------------------------------------------------
+	// FUN_10fd6650 (thiscall on the lobby's member listener; [ecx-50h] = lobby root, [ecx+34h] = session) runs
+	// whenever a player joins or changes. On entry the title "panel_heading" is set to
+	// "Eight Player Campaign (N/8)", N = FUN_10f0eb00(session+58EF4h): the session's connected players.
+	const uint MemberUpdateAt = 0x10FD6650;      // sub esp,84h (6 bytes)
+	const uint MemberUpdateResume = 0x10FD6656;
+	const uint CountPlayers = 0x10F0EB00;        // fastcall(member table) -> count
+	const uint WStrFromAnsi = 0x100ED420;        // thiscall(wstring*; const char*) ret 4
+	const uint WStrDtor = 0x100ED830;            // thiscall(wstring*)
+	const uint SetText = 0x10F9D010;             // thiscall(component; wstring*, bool all_states) ret 8
+
+	static uint EmitTitleCount(Asm a) {
+		const string title = "Eight Player Campaign (0/8)";
+		uint at = a.Here;
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0x83, 0xEC, 0x50);                          // sub esp,50h  ([esp] text, [esp+20h] wstring, [esp+30h] name)
+		a.Raw(0x8B, 0xE9);                                // mov ebp,ecx
+		a.Raw(0x8B, 0x45, 0x34);                          // mov eax,[ebp+34h]       (session)
+		a.Raw(0x85, 0xC0);
+		a.J32("out", 0x0F, 0x84);
+		a.Raw(0x8D, 0x88, 0xF4, 0x8E, 0x05, 0x00);        // lea ecx,[eax+58EF4h]
+		a.Call(CountPlayers);
+		a.Raw(0x83, 0xF8, 0x09);                          // cmp eax,9
+		a.J8(0x72, "one_digit");
+		a.Raw(0xB8, 0x09, 0x00, 0x00, 0x00);              // mov eax,9
+		a.Mark("one_digit");
+		a.Raw(0x8B, 0xD8);                                // mov ebx,eax
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint popAt = a.Here;
+		a.Raw(0x5E);                                      // pop esi
+		int tmplIdx = a.Bytes.Count + 2;
+		a.Raw(0x81, 0xC6, 0, 0, 0, 0);                    // add esi, template - popAt
+		a.Raw(0x8B, 0xFC);                                // mov edi,esp
+		a.Raw(0xB9); Imm(a, (uint)title.Length + 1);      // mov ecx,len+1
+		a.Raw(0xF3, 0xA4);                                // rep movsb               (esi -> "panel_heading")
+		a.Raw(0x80, 0xC3, 0x30);                          // add bl,'0'
+		a.Raw(0x88, 0x5C, 0x24, (byte)title.IndexOf('0'));   // mov [esp+digit],bl
+		a.Raw(0x56);                                      // push esi
+		a.Raw(0x8D, 0x4C, 0x24, 0x34);                    // lea ecx,[esp+34h]
+		a.Call(StrCtor);
+		a.Raw(0x8B, 0x4D, 0xB0);                          // mov ecx,[ebp-50h]       (lobby root)
+		a.Raw(0x8D, 0x44, 0x24, 0x30, 0x50);              // lea eax,[esp+30h] / push eax
+		a.Call(FindChild);
+		a.Raw(0x8B, 0xF0);                                // mov esi,eax
+		a.Raw(0x8D, 0x4C, 0x24, 0x30);                    // lea ecx,[esp+30h]
+		a.Call(StrDtor);
+		a.Raw(0x85, 0xF6);
+		a.J8(0x74, "out");
+		a.Raw(0x8D, 0x04, 0x24, 0x50);                    // lea eax,[esp] / push eax
+		a.Raw(0x8D, 0x4C, 0x24, 0x24);                    // lea ecx,[esp+24h]       (wstring)
+		a.Call(WStrFromAnsi);
+		a.Raw(0x6A, 0x01);                                // push 1                  (all states)
+		a.Raw(0x8D, 0x44, 0x24, 0x24, 0x50);              // lea eax,[esp+24h] / push eax
+		a.Raw(0x8B, 0xCE);                                // mov ecx,esi
+		a.Call(SetText);
+		a.Raw(0x8D, 0x4C, 0x24, 0x20);                    // lea ecx,[esp+20h]
+		a.Call(WStrDtor);
+		a.Mark("out");
+		a.Raw(0x83, 0xC4, 0x50);                          // add esp,50h
+		a.Raw(0x61);                                      // popad
+		a.Raw(0x81, 0xEC, 0x84, 0x00, 0x00, 0x00);        // sub esp,84h             (replaced instruction)
+		a.Jmp(MemberUpdateResume);
+		uint tmpl = a.Here;
+		a.Bytes.AddRange(Encoding.ASCII.GetBytes(title)); a.Raw(0);
+		a.Bytes.AddRange(Encoding.ASCII.GetBytes("panel_heading")); a.Raw(0);
+		FixImm32(a, tmplIdx, tmpl - popAt);
+		a.Resolve();
+		return at;
+	}
+
+	// ---- Load Game screen: every player of a multiplayer save -----------------------------------------
+	// FUN_10fc8dd0 (save selected; ebp = screen, [ebp-3Ch] = root, [ebp+4Ch] = save header) fills
+	// portrait_player1 (you, index [hdr+31h]) and portrait_player2 (index 1, or 0 if you are 1) from the header's
+	// player lists: count byte [hdr+30h], names {.., [hdr+3Ch]} and clan keys {.., [hdr+48h]}, 0Ch apiece.
+	// Saves hold every player, but only two were shown. After those two, this fills portrait_player3..8 (from
+	// build_load_layout.ps1) with the remaining players' names and clan names, and hides the unused rows.
+	const uint LoadPortraitsAt = 0x10FC93B7;     // mov eax,[ebp+4Ch] / xor esi,esi (5 bytes)
+	const uint LoadPortraitsResume = 0x10FC93BC;
+	const uint FrontendGlobal = 0x11BC095C;      // frontend manager pointer
+	const uint FactionDatabase = 0x10BCE670;     // thiscall(x) -> faction database
+	const uint FactionByKey = 0x10308D20;        // thiscall(db; key*) ret 4 -> faction record (+28h: name key)
+
+	static uint EmitLoadScreenPlayers(Asm a) {
+		const string slotName = "portrait_player3";
+		// find: ecx = parent, edx = const char* name -> eax = child or 0
+		uint find = a.Here;
+		a.Raw(0x56, 0x57, 0x83, 0xEC, 0x10);              // push esi / push edi / sub esp,10h
+		a.Raw(0x8B, 0xF1, 0x52);                          // mov esi,ecx / push edx
+		a.Raw(0x8D, 0x4C, 0x24, 0x04);                    // lea ecx,[esp+4]
+		a.Call(StrCtor);
+		a.Raw(0x8B, 0xCE, 0x8D, 0x04, 0x24, 0x50);        // mov ecx,esi / lea eax,[esp] / push eax
+		a.Call(FindChild);
+		a.Raw(0x8B, 0xF8, 0x8D, 0x0C, 0x24);              // mov edi,eax / lea ecx,[esp]
+		a.Call(StrDtor);
+		a.Raw(0x8B, 0xC7, 0x83, 0xC4, 0x10, 0x5F, 0x5E, 0xC3);   // mov eax,edi / add esp,10h / pop edi / pop esi / ret
+
+		uint at = a.Here;
+		a.Raw(0x60, 0x83, 0xEC, 0x40);                    // pushad / sub esp,40h
+		// locals: [esp+0Ch] clan text box, [esp+10h] count, [esp+14h] i, [esp+18h] slot, [esp+1Ch] you,
+		//         [esp+20h] other, [esp+24h] clan record, [esp+28h] "portrait_playerN"
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint B = a.Here;
+		a.Raw(0x5B);                                      // pop ebx                 (base for strings / global)
+		int strIdx = a.Bytes.Count;
+		a.Raw(0x8B, 0x7D, 0x4C);                          // mov edi,[ebp+4Ch]       (save header)
+		a.Raw(0x85, 0xFF);
+		a.J32("out", 0x0F, 0x84);
+		a.Raw(0x0F, 0xB6, 0x47, 0x30, 0x89, 0x44, 0x24, 0x10);   // movzx eax,byte [edi+30h] / mov [esp+10h],eax
+		a.Raw(0x0F, 0xB6, 0x47, 0x31, 0x89, 0x44, 0x24, 0x1C);   // movzx eax,byte [edi+31h] / mov [esp+1Ch],eax
+		a.Raw(0x33, 0xC9, 0x85, 0xC0, 0x0F, 0x94, 0xC1);  // xor ecx,ecx / test eax,eax / sete cl
+		a.Raw(0x89, 0x4C, 0x24, 0x20);                    // mov [esp+20h],ecx       (the player in portrait 2)
+		a.Raw(0xC7, 0x44, 0x24, 0x18, 0x03, 0x00, 0x00, 0x00);   // mov dword [esp+18h],3
+		a.Raw(0xC7, 0x44, 0x24, 0x14, 0x00, 0x00, 0x00, 0x00);   // mov dword [esp+14h],0
+		Action<string> strEdx = null, strEsi = null;      // filled below once the string offsets are known
+		var strFix = new List<KeyValuePair<int, string>>();
+		strEdx = key => { a.Raw(0x8D, 0x93); strFix.Add(new KeyValuePair<int, string>(a.Bytes.Count, key)); Imm(a, 0); };   // lea edx,[ebx+s]
+		strEsi = key => { a.Raw(0x8D, 0xB3); strFix.Add(new KeyValuePair<int, string>(a.Bytes.Count, key)); Imm(a, 0); };   // lea esi,[ebx+s]
+		Action makeName = () => {                         // [esp+28h] = "portrait_player" + slot
+			strEsi("slot");
+			a.Raw(0x57, 0x8D, 0x7C, 0x24, 0x2C);          // push edi / lea edi,[esp+2Ch]
+			a.Raw(0xB9); Imm(a, (uint)slotName.Length + 1);
+			a.Raw(0xF3, 0xA4, 0x5F);                      // rep movsb / pop edi
+			a.Raw(0x8A, 0x44, 0x24, 0x18, 0x04, 0x30);    // mov al,[esp+18h] / add al,'0'
+			a.Raw(0x88, 0x44, 0x24, (byte)(0x28 + slotName.Length - 1));
+		};
+		Action frontend = () => {                         // eax = [frontend]+18h -> vcall 4Ch
+			a.Raw(0x8B, 0x83); Imm(a, FrontendGlobal - B);   // mov eax,[ebx+global]
+			a.Raw(0x8D, 0x48, 0x18, 0x8B, 0x01, 0xFF, 0x50, 0x4C);   // lea ecx,[eax+18h] / mov eax,[ecx] / call [eax+4Ch]
+		};
+		a.Mark("loop");
+		a.Raw(0x8B, 0x44, 0x24, 0x14, 0x3B, 0x44, 0x24, 0x10);   // mov eax,[esp+14h] / cmp eax,[esp+10h]
+		a.J32("hide", 0x0F, 0x83);                        // jae hide
+		a.Raw(0x3B, 0x44, 0x24, 0x1C); a.J32("next", 0x0F, 0x84);   // skip you
+		a.Raw(0x3B, 0x44, 0x24, 0x20); a.J32("next", 0x0F, 0x84);   // skip portrait 2
+		a.Raw(0x83, 0x7C, 0x24, 0x18, 0x08); a.J32("hide", 0x0F, 0x87);   // slot > 8
+		makeName();
+		a.Raw(0x8B, 0x4D, 0xC4, 0x8D, 0x54, 0x24, 0x28); a.Call(find);   // mov ecx,[ebp-3Ch] / lea edx,[esp+28h]
+		a.Raw(0x85, 0xC0); a.J32("out", 0x0F, 0x84);       // layout without the rows: stop
+		a.Raw(0x8B, 0xF0, 0x6A, 0x01, 0x8B, 0xCE); a.Call(SetVisible);  // mov esi,eax / SetVisible(1)
+		// player name
+		a.Raw(0x8B, 0xCE); strEdx("name"); a.Call(find);
+		a.Raw(0x85, 0xC0); a.J8(0x74, "clan");
+		a.Raw(0x8B, 0x54, 0x24, 0x14, 0x6B, 0xD2, 0x0C, 0x03, 0x57, 0x3C);   // mov edx,[esp+14h] / imul edx,edx,0Ch / add edx,[edi+3Ch]
+		a.Raw(0x6A, 0x00, 0x52, 0x8B, 0xC8); a.Call(SetText);
+		a.Mark("clan");
+		frontend();
+		a.Raw(0x8B, 0x48, 0x10); a.Call(FactionDatabase);  // mov ecx,[eax+10h]
+		a.Raw(0x8B, 0x54, 0x24, 0x14, 0x6B, 0xD2, 0x0C, 0x03, 0x57, 0x48);   // edx = clan key of player i
+		a.Raw(0x52, 0x8B, 0xC8); a.Call(FactionByKey);
+		a.Raw(0x85, 0xC0); a.J32("slotdone", 0x0F, 0x84);
+		a.Raw(0x89, 0x44, 0x24, 0x24);                    // mov [esp+24h],eax
+		a.Raw(0x8B, 0xCE); strEdx("clan"); a.Call(find);
+		a.Raw(0x85, 0xC0); a.J32("slotdone", 0x0F, 0x84);
+		a.Raw(0x89, 0x44, 0x24, 0x0C);                    // mov [esp+0Ch],eax
+		frontend();
+		a.Raw(0x6A, 0x01, 0x8B, 0x48, 0x10, 0x8B, 0x89, 0x38, 0x0D, 0x00, 0x00);   // push 1 / mov ecx,[eax+10h] / mov ecx,[ecx+0D38h]
+		a.Raw(0x8B, 0x44, 0x24, 0x28, 0x83, 0xC0, 0x28, 0x50);   // mov eax,[esp+28h] (record) / add eax,28h / push eax
+		a.Raw(0x8B, 0x01, 0xFF, 0x50, 0x08);              // mov eax,[ecx] / call [eax+8]  -> localised clan name
+		a.Raw(0x6A, 0x00, 0x50, 0x8B, 0x4C, 0x24, 0x14); a.Call(SetText);   // push 0 / push eax / mov ecx,[esp+14h]
+		a.Mark("slotdone");
+		a.Raw(0xFF, 0x44, 0x24, 0x18);                    // inc dword [esp+18h]
+		a.Mark("next");
+		a.Raw(0xFF, 0x44, 0x24, 0x14);                    // inc dword [esp+14h]
+		a.J32("loop", 0xE9);
+		a.Mark("hide");                                   // rows nobody uses
+		a.Raw(0x83, 0x7C, 0x24, 0x18, 0x08); a.J8(0x77, "out");
+		makeName();
+		a.Raw(0x8B, 0x4D, 0xC4, 0x8D, 0x54, 0x24, 0x28); a.Call(find);
+		a.Raw(0x85, 0xC0); a.J8(0x74, "out");
+		a.Raw(0x6A, 0x00, 0x8B, 0xC8); a.Call(SetVisible);
+		a.Raw(0xFF, 0x44, 0x24, 0x18);
+		a.J8(0xEB, "hide");
+		a.Mark("out");
+		a.Raw(0x83, 0xC4, 0x40, 0x61);                    // add esp,40h / popad
+		a.Raw(0x8B, 0x45, 0x4C, 0x33, 0xF6);              // mov eax,[ebp+4Ch] / xor esi,esi (replaced)
+		a.Jmp(LoadPortraitsResume);
+		var strs = new Dictionary<string, uint>();
+		foreach (var kv in new[] { new KeyValuePair<string, string>("slot", slotName), new KeyValuePair<string, string>("name", "player_name"), new KeyValuePair<string, string>("clan", "dy_clan_name") }) {
+			strs[kv.Key] = a.Here; a.Bytes.AddRange(Encoding.ASCII.GetBytes(kv.Value)); a.Raw(0);
+		}
+		foreach (var f in strFix) FixImm32(a, f.Key, strs[f.Value] - B);
+		a.Resolve();
+		return at;
+	}
+
+	// ---- co-op team for every human clan -------------------------------------------------------------------
+	// FUN_1068e0e0 (faction manager in esi) rebuilds the co-op team list [mgr+13Ch..144h] (the list
+	// FUN_1068d240 uses for "co-op ally"): every clan with a human player record [clan+6D8h] whose campaign type
+	// [record+74h] is co-op short/long (5/6, FUN_105cb5b0). Each human gets that type from the lobby slot, so
+	// a record set up as anything else would leave that player out of the team.
+	// Fix, at that call: if the record isn't co-op but another human's record is, copy that co-op type into it
+	// (so every other co-op check agrees) and count it in. Head-to-head (no co-op record) is unchanged.
+	const uint CoopMemberCall = 0x1068E124;      // call FUN_105cb5b0 (ecx = player record, esi = faction manager)
+	const uint IsCoopRecord = 0x105CB5B0;
+
+	static uint EmitCoopMember(Asm a) {
+		uint at = a.Here;
+		a.Call(IsCoopRecord);
+		a.Raw(0x84, 0xC0); a.J8(0x75, "ret");             // already co-op
+		a.Raw(0x8B, 0x93, 0xD8, 0x06, 0x00, 0x00);        // mov edx,[ebx+6D8h]      (this human's record; ebx = clan at the call)
+		a.Raw(0x53, 0x57, 0x51);                          // push ebx / push edi / push ecx
+		a.Raw(0x8B, 0x7E, 0x44, 0x8B, 0x4E, 0x40);        // mov edi,[esi+44h] / mov ecx,[esi+40h]  (all clans)
+		a.Raw(0x85, 0xC9); a.J8(0x74, "none");
+		a.Mark("scan");
+		a.Raw(0x8B, 0x1F, 0x8B, 0x9B, 0xD8, 0x06, 0x00, 0x00);   // mov ebx,[edi] / mov ebx,[ebx+6D8h]
+		a.Raw(0x85, 0xDB); a.J8(0x74, "nx");
+		a.Raw(0x8B, 0x43, 0x74);                          // mov eax,[ebx+74h]
+		a.Raw(0x83, 0xF8, 0x05); a.J8(0x74, "yes");
+		a.Raw(0x83, 0xF8, 0x06); a.J8(0x74, "yes");
+		a.Mark("nx");
+		a.Raw(0x83, 0xC7, 0x04, 0x49); a.J8(0x75, "scan");   // add edi,4 / dec ecx / jnz scan
+		a.Mark("none");
+		a.Raw(0x33, 0xC0); a.J8(0xEB, "done");            // xor eax,eax
+		a.Mark("yes");
+		a.Raw(0x89, 0x42, 0x74, 0xB0, 0x01);              // mov [edx+74h],eax / mov al,1
+		a.Mark("done");
+		a.Raw(0x59, 0x5F, 0x5B);                          // pop ecx / pop edi / pop ebx
+		a.Mark("ret");
+		a.Raw(0xC3);
+		a.Resolve();
+		return at;
+	}
+
 	// ---- crash reporter ----------------------------------------------------------------------------------
 	// The game builds a Crash.dmp path at start-up but never installs a handler, so a crash leaves no trace.
 	// This installs an unhandled-exception filter (once, from the frame hook) that writes eightplayer_crash.txt
@@ -1047,6 +1270,14 @@ public static class EightPlayerPatcher {
 		uint forcedAt = EmitForcedResyncAnswer(s);
 		RedirectCall(ResyncAnswerCall, ResyncAnswer, forcedAt);
 		ReserveDataDword(ResyncKeyPrevVa);
+		uint coopAt = EmitCoopMember(s);
+		RedirectCall(CoopMemberCall, IsCoopRecord, coopAt);
+		uint loadAt = EmitLoadScreenPlayers(s);
+		ExpectBytes(LoadPortraitsAt, 0x8B, 0x45, 0x4C, 0x33, 0xF6);
+		PutJmp(LoadPortraitsAt, loadAt, 5);
+		uint titleAt = EmitTitleCount(s);
+		ExpectBytes(MemberUpdateAt, 0x81, 0xEC, 0x84, 0x00, 0x00, 0x00);
+		PutJmp(MemberUpdateAt, titleAt, 6);
 		ReserveDataDword(CrashPrevFilterVa);
 		ReserveDataDword(CrashInstalledVa);
 		AddSection(".s2mp", s.Bytes);

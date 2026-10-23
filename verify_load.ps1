@@ -54,7 +54,7 @@ $fileSec = New-Object byte[] $secLen; [Array]::Copy($file, $secRaw, $fileSec, 0,
 $sameSec = [Linq.Enumerable]::SequenceEqual([byte[]](At $secVa $secLen), [byte[]]$fileSec)
 "fix section        : {0} at {1:X8}, {2} bytes; identical to file: {3}" -f $secName, $secVa, $secLen, $sameSec
 if ($secName -ne '.s2mp' -or -not $sameSec) { $ok = $false }
-foreach ($hook in @(@(0x11107F30, 'ally battle result'), @(0x110E50FA, 'gift recipient'), @(0x10F05914, 'auto resync'), @(0x10FD5B70, 'invite buttons'), @(0x100B190C, 'frame fp pin'), @(0x10227D40, 'tick fp pin'), @(0x10EE9A71, 'battle no-kick'), @(0x10EF9A87, 'report no-kick'), @(0x10F10E2D, 'forced resync'))) {
+foreach ($hook in @(@(0x11107F30, 'ally battle result'), @(0x110E50FA, 'gift recipient'), @(0x10F05914, 'auto resync'), @(0x10FD5B70, 'invite buttons'), @(0x100B190C, 'frame fp pin'), @(0x10227D40, 'tick fp pin'), @(0x10EE9A71, 'battle no-kick'), @(0x10EF9A87, 'report no-kick'), @(0x10F10E2D, 'forced resync'), @(0x1068E124, 'co-op team'), @(0x10FC93B7, 'load screen players'), @(0x10FD6650, 'title count'))) {
 	$ins = At $hook[0] 5
 	$dest = [int64]$hook[0] + 5 + [BitConverter]::ToInt32($ins, 1)
 	$inSec = $dest -ge $secVa -and $dest -lt ($secVa + $secLen)

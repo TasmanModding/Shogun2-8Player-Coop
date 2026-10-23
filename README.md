@@ -9,6 +9,9 @@ Builds on the 4-player campaign mod. Installing this one removes the 4-player mo
 | | |
 |---|---|
 | **Up to 8 players** | The multiplayer campaign lobby has 8 player slots (two rows, 4 each side of the map) and the host session accepts 8 players. 8 is the engine's limit: its multiplayer battles are built for at most 8 (4v4). |
+| **Player count** | The lobby title shows how many players have joined, e.g. "Eight Player Campaign (3/8)". |
+| **Co-op team for everyone** | In co-op, every human clan is on the co-op team (can't attack each other, shared co-op rules), not just players 1 and 2. |
+| **Load screen shows every player** | Selecting a multiplayer save lists all its players (clan and name), four down each side of the map, instead of only two. |
 | **Kick and invite buttons** | Every slot's kick button works and kicks that player, and every empty slot's invite button opens the friends list (the host sees them; the original game only wired one). The lobby is titled "Eight Player Campaign". |
 | **Battle result for allies** | Fixed: players who weren't in a battle were shown the *defender's* result. When your side attacked and won, your allies saw "defeat"; when it defended, they saw "victory". Now they see the result of the ally who fought. |
 | **Gift units to spectators** | With more than one spectator, gifted units could only ever go to the first one, and other spectators couldn't hand units back. Now each press of the gift button sends the selected units to the **next spectator in turn** (in join order), and any spectator can hand units back. With one spectator nothing changes. |
@@ -33,8 +36,8 @@ Everyone must also end up with the same two hashes, or they can't join each othe
 
 | File | SHA-256 |
 |---|---|
-| `empire.retail.dll` | `1154874FC3DCA9889746A208506814FCD297238BEE8D442B5AB30FA09000D035` |
-| `data\eightplayer_coop.pack` | `EA1F6EF9BB83A89330A56D59F4B4002F114F06529543FE02970BCB23FA3C75E5` |
+| `empire.retail.dll` | `E61D21D43F42AA92F1179523AA425A4D3BA2750DDC02B430519306673D016637` |
+| `data\eightplayer_coop.pack` | `983F63E02958AF253B911934680AEE736CED160B2BB9FC152023EBCF479853F5` |
 
 ## Before you play
 - **Use spare Steam accounts.** Shogun 2 multiplayer is VAC-protected and this mod changes the engine DLL.
@@ -63,15 +66,14 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 7. If "out of sync" appears on the campaign map: the resync should start on its own and the game carry on afterwards. In a battle: nobody is dropped and the battle carries on.
 8. Save, quit, resume.
 9. Head-to-head, 3 players: two of them fight each other (field battle, then a siege). Does the third player crash? If so, send their `eightplayer_crash.txt`.
-10. On the campaign map the host presses Ctrl+Shift+F9: the resync popup appears for everyone and the game carries on afterwards.
+10. Co-op with 3+ players: try to declare war on or attack player 3's army as player 1. The game should refuse (co-op ally).
+11. Load a 3+ player save: the Load screen lists every player.
+12. On the campaign map the host presses Ctrl+Shift+F9: the resync popup appears for everyone and the game carries on afterwards.
 
 ## Known issue: head-to-head with 3+ players
 Reported with the 4-player mod and not fixed yet: in a **head-to-head** campaign with 3 or more players, when two players fight each other the player who isn't in the battle can crash to desktop (sieges are reported to work). Until it's fixed, **auto-resolve battles between two human players** in head-to-head games with 3+ players, or play co-op. If it happens to you, send `eightplayer_crash.txt` from the game folder of the player who crashed.
 
 ## Not done yet
-- **Save/load screens** show only two players (cosmetic; the save itself holds everyone).
-- **Co-op alliances for players 3–8** at campaign start are untested. If clans start neutral, ally them through diplomacy;
-  the battle-result fix follows the game's real alliances.
 - **Battle desyncs** no longer drop anyone, but the battle itself can't be resynced: the out-of-sync player's view may differ until the campaign map, where the host's state wins.
 - Two known causes are fixed (above); others may remain. Possible: Intel and AMD CPUs can give slightly different
   results for sine/cosine instructions the battle code uses. If a desync still happens, send every player's `logs` folder.
@@ -80,7 +82,7 @@ Reported with the 4-player mod and not fixed yet: in a **head-to-head** campaign
 | Path | What |
 |---|---|
 | `Install.bat`, `Uninstall.bat`, `install.ps1` | installer / uninstaller |
-| `build_lobby_layout.ps1` | builds the 8-slot lobby layout from your own copy of the game |
+| `build_lobby_layout.ps1`, `build_load_layout.ps1` | build the 8-slot lobby and the 8-player Load screen from your own copy of the game |
 | `lib\Patcher.cs` | builds the patched engine DLL (checks the original first) |
 | `lib\LayoutTool.cs`, `lib\PackTools.cs`, `lib\PackWriter.cs` | read/write UI layouts and `.pack` files |
 | `verify_load.ps1` | loads a patched DLL with Windows' loader (no code runs) and checks every patch |

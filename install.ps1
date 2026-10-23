@@ -126,6 +126,14 @@ try {
 	& (Join-Path $PSScriptRoot 'build_lobby_layout.ps1') -Original $inFile -Out $outFile | Out-Host
 	$list = New-Object 'System.Collections.Generic.List[System.Collections.Generic.KeyValuePair[string,byte[]]]'
 	$list.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,byte[]]' $layoutName, ([IO.File]::ReadAllBytes($outFile))))
+	# the Load Game screen with a row for every player
+	$loadName = 'ui\frontend ui\mp_load_game'
+	$loadEntry = [Pack]::Index($dataPack) | Where-Object { $_.Name -eq $loadName } | Select-Object -First 1
+	if (-not $loadEntry) { throw "'$loadName' not found in data.pack" }
+	$loadIn = Join-Path $work 'original_load'; $loadOut = Join-Path $work 'load_8p'
+	[IO.File]::WriteAllBytes($loadIn, [Pack]::Read($dataPack, $loadEntry))
+	& (Join-Path $PSScriptRoot 'build_load_layout.ps1') -Original $loadIn -Out $loadOut | Out-Host
+	$list.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,byte[]]' $loadName, ([IO.File]::ReadAllBytes($loadOut))))
 	[PackWriter]::Write($packPath, $list)
 	"Wrote data\$packName (sha256 $(Sha $packPath)). All players should see the same hash."
 }
