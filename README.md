@@ -31,6 +31,8 @@ Join the **Tasman Modding Discord** for help, finding players, bug reports and u
    `powershell -ExecutionPolicy Bypass -File install.ps1 -GamePath "D:\...\Total War SHOGUN 2"`.
 3. Start Shogun 2 from Steam and host a multiplayer campaign.
 
+**Updating:** every new version is published on [GitHub](https://github.com/TasmanModding/Shogun2-8Player-Coop/releases/latest). Steam Workshop can only share `.pack` files, so it can't update the engine part of the mod for you. Download the newest zip, unzip it and run `Install.bat`: it replaces the old version. New versions are announced in the [Discord](https://discord.gg/medh2d8nk). Update together with your friends, since everyone needs the same version.
+
 **`Uninstall.bat`** puts everything back. Steam's "Verify integrity of game files" also restores the original DLL.
 
 At the end the installer prints a **MATCH CODE** (8 letters/digits). Everyone compares it: the same code means the same game files, including any other mods. A different code means someone has a different mod enabled, which causes desyncs; the installer also warns about other enabled mods.
