@@ -87,4 +87,4 @@ Reported with the 4-player mod and not fixed yet: in a **head-to-head** campaign
 | `preview\` | schematic of the lobby (boxes only, no game artwork) |
 | `NOTES.md` | reverse-engineering notes |
 
-**Download:** get the zip from the [Releases page](https://github.com/thanasinimo/Shogun2-8Player-Coop/releases/latest). It contains no game files: the installer builds the mod from your own copy of the game.
+**Download:** get the zip from the [Releases page](https://github.com/TasmanModding/Shogun2-8Player-Coop/releases/latest). It contains no game files: the installer builds the mod from your own copy of the game.
