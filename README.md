@@ -22,6 +22,9 @@ Builds on the 4-player campaign mod. Installing this one removes the 4-player mo
 | **Crash reports** | If the game crashes, it writes `eightplayer_crash.txt` in the game folder (where the crash happened in the game's code). Send that file with your bug report: it lets the crash be fixed instead of guessed at. |
 | **Battle desync: no more kick** | A battle can't be resynced, so the game used to drop the out-of-sync player. Now the battle carries on for everyone. The out-of-sync player's view may drift (a unit alive on their screen that is dead for others). Back on the campaign map, the host's state is copied to everyone by the campaign resync. |
 
+## Community
+Join the **Tasman Modding Discord** for help, finding players, bug reports and updates: https://discord.gg/medh2d8nk
+
 ## Install / uninstall
 1. Everyone closes Shogun 2.
 2. Double-click **`Install.bat`**. It finds the game in your Steam folders. If yours is somewhere else, run
@@ -40,7 +43,7 @@ Everyone must also end up with the same two hashes, or they can't join each othe
 | `data\eightplayer_coop.pack` | `983F63E02958AF253B911934680AEE736CED160B2BB9FC152023EBCF479853F5` |
 
 ## Before you play
-- **Use spare Steam accounts.** Shogun 2 multiplayer is VAC-protected and this mod changes the engine DLL.
+- **About VAC (anti-cheat):** Steam no longer lists Valve Anti-Cheat for Shogun 2. The VAC label was added to the store page on 29 April 2026 and removed again on 21 July 2026. That's good news, but this mod still changes the game's engine file, so stay sensible: play with friends, and use a spare account if you want to be extra safe.
 - It only works on the current Steam version of the game; the installer refuses anything else.
 - Start with the main Sengoku Jidai campaign. Rise of the Samurai and Fall of the Samurai have special clan rules in the lobby.
 - To give desyncs fewer chances: everyone has **no other mods** enabled and the **same game version**.
@@ -75,7 +78,7 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 
 **Until it's fixed:** auto-resolve battles between two human players in head-to-head games with 3+ players, or play co-op.
 
-**Please send bug reports: more of them are needed to map out this problem.** [Open an issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md) or comment on the Steam Workshop page, and include:
+**Please send bug reports: more of them are needed to map out this problem.** Post it in the [Discord](https://discord.gg/medh2d8nk), [open an issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md) or comment on the Steam Workshop page, and include:
 - **`eightplayer_crash.txt`** from the game folder of the player who crashed (Steam > right-click the game > Manage > Browse local files). This is the most useful part: it shows exactly where the game broke.
 - How many players, and which one crashed (host or not, in the battle or watching).
 - The campaign (Shogun 2, Rise of the Samurai or Fall of the Samurai) and clans.
