@@ -42,7 +42,7 @@ Everyone must also end up with the same two hashes, or they can't join each othe
 
 | File | SHA-256 |
 |---|---|
-| `empire.retail.dll` | `D9A98EF07A50F64032C1EFC6BBFEFBD67CB32C36CE71D9F1CF2F409D7FE577D7` |
+| `empire.retail.dll` | `9A9D5330E9A9C77784F630DD3333EF254DE6CA48CE3AFD71729E930C6B812DFA` |
 | `data\eightplayer_coop.pack` | `983F63E02958AF253B911934680AEE736CED160B2BB9FC152023EBCF479853F5` |
 
 ## Before you play
@@ -78,8 +78,8 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 13. Load a 3+ player save: the Load screen lists every player.
 14. On the campaign map the host presses Ctrl+Shift+F9: the resync popup appears for everyone and the game carries on afterwards.
 
-## v2.0: please test and report
-**Fixed in v2.0:**
+## v1.10: please test and report
+**Fixed in v1.10:**
 - **Head-to-head crash.** With 3+ players, when two players fought each other, everyone else crashed. Crash dumps from testers showed the cause: the game asks "who controls my side of the battle?" for every player, assuming they're in the battle. For a player who isn't (which only happens with 3+ players), it read an empty side and crashed. Players not in a battle now get "nobody in this battle", as the original game's one non-fighting player does. The same bug could also hit co-op.
 - **Small crash logs.** A crash now leaves `eightplayer_crash.txt` (a few KB) and `eightplayer_crash.dmp` (a small dump, well under 1 MB) in the game folder, instead of Steam's 1–2 GB memory dump. Send both with a bug report.
 

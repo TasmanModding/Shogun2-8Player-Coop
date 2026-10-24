@@ -465,7 +465,7 @@ public static class EightPlayerPatcher {
 	const uint GetCurrentThreadIdIat = 0x115A11F4;
 	const uint CrashPrevFilterVa = 0x11CB1538;   // previous filter (third reserved .data dword)
 	const uint CrashInstalledVa = 0x11CB153C;    // filter installed (fourth)
-	public const string Version = "2.0";
+	public const string Version = "1.10";
 	static uint crashFilterAt;
 
 	// ---- engine error log ------------------------------------------------------------------------------
