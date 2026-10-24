@@ -379,16 +379,25 @@ public static class EightPlayerPatcher {
 	const uint CoopMemberCall = 0x1068E124;      // call FUN_105cb5b0 (ecx = player record, esi = faction manager)
 	const uint IsCoopRecord = 0x105CB5B0;
 
+	// Only HUMAN clans ([clan+6A0h]) count: start positions and saves also give player records to playable AI
+	// clans, and v1.6 (which didn't check) made every one of them a permanent co-op ally.
 	static uint EmitCoopMember(Asm a) {
 		uint at = a.Here;
+		a.Raw(0x80, 0xBB, 0xA0, 0x06, 0x00, 0x00, 0x00);  // cmp byte [ebx+6A0h],0   (ebx = clan at the call)
+		a.J8(0x75, "human");
+		a.Raw(0x32, 0xC0, 0xC3);                          // AI clan: never on the co-op team (xor al,al / ret)
+		a.Mark("human");
 		a.Call(IsCoopRecord);
 		a.Raw(0x84, 0xC0); a.J8(0x75, "ret");             // already co-op
-		a.Raw(0x8B, 0x93, 0xD8, 0x06, 0x00, 0x00);        // mov edx,[ebx+6D8h]      (this human's record; ebx = clan at the call)
+		a.Raw(0x8B, 0x93, 0xD8, 0x06, 0x00, 0x00);        // mov edx,[ebx+6D8h]      (this human's record)
 		a.Raw(0x53, 0x57, 0x51);                          // push ebx / push edi / push ecx
 		a.Raw(0x8B, 0x7E, 0x44, 0x8B, 0x4E, 0x40);        // mov edi,[esi+44h] / mov ecx,[esi+40h]  (all clans)
 		a.Raw(0x85, 0xC9); a.J8(0x74, "none");
 		a.Mark("scan");
-		a.Raw(0x8B, 0x1F, 0x8B, 0x9B, 0xD8, 0x06, 0x00, 0x00);   // mov ebx,[edi] / mov ebx,[ebx+6D8h]
+		a.Raw(0x8B, 0x1F);                                // mov ebx,[edi]           (clan)
+		a.Raw(0x80, 0xBB, 0xA0, 0x06, 0x00, 0x00, 0x00);  // cmp byte [ebx+6A0h],0   (other humans only)
+		a.J8(0x74, "nx");
+		a.Raw(0x8B, 0x9B, 0xD8, 0x06, 0x00, 0x00);        // mov ebx,[ebx+6D8h]      (its record)
 		a.Raw(0x85, 0xDB); a.J8(0x74, "nx");
 		a.Raw(0x8B, 0x43, 0x74);                          // mov eax,[ebx+74h]
 		a.Raw(0x83, 0xF8, 0x05); a.J8(0x74, "yes");
@@ -407,6 +416,39 @@ public static class EightPlayerPatcher {
 		return at;
 	}
 
+	// ---- players not in a battle (3+ humans) ------------------------------------------------------------
+	// FUN_105cefa0 decides what a human who is NOT in a battle controls when it starts. It counts the human
+	// players ([[..+0EA0h]+30h], 0B8h per slot, active flag +0A0h) and handles exactly 2: follow the human who is
+	// in the battle ("ally spectate", 281E9h = 1, the mode gifting uses), or for one battle kind (FUN_105cbb50)
+	// take the pending battle's army. Any other count makes a plain spectator of alliance 0 / army 0, a path
+	// 2-player campaigns never reach and that closes the game. Players 3+ were always on it, which is why
+	// everyone not in a battle quit, and (with v1.6's AI co-op team) why AI battles closed every game.
+	// Fix: "count == 2" -> "count >= 2", so 3..8 humans get the same tested handling as 2.
+	const uint NonParticipantCountJump = 0x105CF0A1;   // cmp ecx,2 / jne -> jb  (0F 85 -> 0F 82)
+
+	// ---- leaving a campaign battle early with 3+ players ----------------------------------------------------
+	// FUN_10f1f8d0 (esi = session+8) runs when a player leaves a battle before it is finished. A non-host may
+	// leave normally only if the session has at most 2 players (FUN_10f0eb00 <= 2); otherwise they are
+	// disconnected from the session (FUN_10f033e0). Right for 3+ player custom battles, wrong in a campaign,
+	// where a player retreating or leaving a battle dropped out of the whole campaign.
+	// Fix: keep the rule outside campaigns; in a campaign ([session+596D8h], campaign environment) leave normally.
+	const uint LeaveBattleCountAt = 0x10F1F91E;   // cmp eax,2 / ja 10F1F931 (5 bytes)
+	const uint LeaveBattleAllowed = 0x10F1F923;
+	const uint LeaveBattleDisconnect = 0x10F1F931;
+
+	static uint EmitLeaveBattleRule(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x83, 0xF8, 0x02);                          // cmp eax,2
+		a.J8(0x76, "allowed");                            // jbe allowed            (original rule)
+		a.Raw(0x83, 0xBE, 0xD0, 0x96, 0x05, 0x00, 0x00);  // cmp dword [esi+596D0h],0   (session+596D8h: campaign)
+		a.J8(0x75, "allowed");
+		a.Jmp(LeaveBattleDisconnect);
+		a.Mark("allowed");
+		a.Jmp(LeaveBattleAllowed);
+		a.Resolve();
+		return at;
+	}
+
 	// ---- crash reporter ----------------------------------------------------------------------------------
 	// The game builds a Crash.dmp path at start-up but never installs a handler, so a crash leaves no trace.
 	// This installs an unhandled-exception filter (once, from the frame hook) that writes eightplayer_crash.txt
@@ -418,7 +460,7 @@ public static class EightPlayerPatcher {
 	const uint CloseHandleIat = 0x115A1158;
 	const uint CrashPrevFilterVa = 0x11CB1538;   // previous filter (third reserved .data dword)
 	const uint CrashInstalledVa = 0x11CB153C;    // filter installed (fourth)
-	public const string Version = "1.5";
+	public const string Version = "1.7";
 	static uint crashFilterAt;
 
 	static void Imm(Asm a, uint v) { a.Bytes.AddRange(BitConverter.GetBytes(v)); }
@@ -1270,6 +1312,11 @@ public static class EightPlayerPatcher {
 		uint forcedAt = EmitForcedResyncAnswer(s);
 		RedirectCall(ResyncAnswerCall, ResyncAnswer, forcedAt);
 		ReserveDataDword(ResyncKeyPrevVa);
+		ExpectBytes(NonParticipantCountJump - 3, 0x83, 0xF9, 0x02, 0x0F, 0x85);
+		b[VaToOff(NonParticipantCountJump) + 1] = 0x82;
+		uint leaveAt = EmitLeaveBattleRule(s);
+		ExpectBytes(LeaveBattleCountAt, 0x83, 0xF8, 0x02, 0x77, 0x0E);
+		PutJmp(LeaveBattleCountAt, leaveAt, 5);
 		uint coopAt = EmitCoopMember(s);
 		RedirectCall(CoopMemberCall, IsCoopRecord, coopAt);
 		uint loadAt = EmitLoadScreenPlayers(s);

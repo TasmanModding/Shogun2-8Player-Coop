@@ -20,7 +20,9 @@ Tools: Ghidra 12.1.4 headless (`re/ghidra_proj`; `re/q.ps1` runs `re/query.txt` 
 | Crash reporter: SetUnhandledExceptionFilter once from the frame hook; writes eightplayer_crash.txt (code, address, DLL base, regs, 64 stack dwords), then chains to the previous filter; prev/installed dwords 11CB1538/11CB153C | frame hook | `.s2mp` before the frame stub |
 | Lobby title "(N/8)": FUN_10fd6650 entry (member update; [ecx-50h] root, [ecx+34h] session), count FUN_10f0eb00(session+58EF4h), text via FUN_100ed420 + SetText FUN_10f9d010 | 10FD6650 (6 bytes) jmp | `.s2mp` |
 | Load screen players 3..8: after portrait_player2 in FUN_10fc8dd0; header count [h+30h], you [h+31h], names [h+3Ch], clan keys [h+48h] (0Ch each); clan name via [[11BC095C]+18h]->4Ch, +10h -> FUN_10bce670 -> FUN_10308d20(key), [[..+10h]+D38h]->8(rec+28h,1) | 10FC93B7 (5 bytes) jmp; layout build_load_layout.ps1 | `.s2mp` |
-| Co-op team: FUN_1068e0e0 adds clans whose human record [clan+6D8h] has campaign type [rec+74h] 5/6 (FUN_105cb5b0); a non-co-op human record gets the co-op type when another human's is co-op | 1068E124 call retarget | `.s2mp` |
+| Co-op team: FUN_1068e0e0 adds clans whose record [clan+6D8h] has campaign type [rec+74h] 5/6 (FUN_105cb5b0). v1.7: only HUMAN clans ([clan+6A0h]); a human record gets the co-op type when another human's is co-op. (v1.6 also did this for AI clans: start positions/saves give playable AI clans records, so every AI clan became a permanent co-op ally, and FUN_10602b20 then made AI battles MP battles.) | 1068E124 call retarget | `.s2mp` |
+| Players not in a battle, 3+ humans: FUN_105cefa0 (pending battle; local clan) handled exactly 2 humans (follow the human in the battle, 281E9h = 1; or FUN_105cbb50 battle kind: pending army +0CCh); any other count -> plain spectator of alliance 0/army 0, a path 2-player campaigns never reach and that closed the game | 105CF0A1 jne -> jb (count >= 2) | - |
+| Leaving a battle early (FUN_10f1f8d0, esi = session+8): non-host with > 2 players was disconnected (FUN_10f033e0); now only outside campaigns ([session+596D8h]) | 10F1F91E (5 bytes) jmp | `.s2mp` |
 | Invite buttons on slots 3..8 (frames invite_frame3..8) | 10FD5B70 (7 bytes) jmp; original wires only root.FindChild("button_invite") at 10FD5B36 | `.s2mp` + 13F |
 
 `.s2mp` is a new RX section appended after `.reloc` (one free header slot existed). Its code uses only relative
@@ -97,7 +99,9 @@ calls/jumps, and no relocation covers a patched byte (`verify_load.ps1` checks u
 Acting during another player's turn; mismatched mods or DirectX; naval battles and auto-resolve; diplomacy prompts;
 long campaigns; both players saving. No official root cause is known.
 
-### Head-to-head with 3+ players (open)
+### Head-to-head with 3+ players (fixed in v1.7, see the patch table)
+- Silent closes: the engine has many checks that log "Error: ..." via FUN_100c19b0 (message goes to the handler at
+  117CC494, not shown) and then TerminateProcess(GetCurrentProcess(), 0): no crash, no WER entry, no crash file.
 - Reported (4-player mod, FotS H2H, no other mods): when two humans fight, the human not in the battle crashes to desktop; sieges work.
 - Pre-battle panel FUN_111853c0 picks a handler by role: [+74h] / [+70h] = the two sides, [+78h] = third party (FUN_11167480:
   button_spectate_battle -> vfunc 74h, button_play_as_ai -> 78h, button_autoresolve -> 3Ch). In 2-player games the third-party
