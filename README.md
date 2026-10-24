@@ -15,7 +15,7 @@ Builds on the 4-player campaign mod. Installing this one removes the 4-player mo
 | **Load screen shows every player** | Selecting a multiplayer save lists all its players (clan and name), four down each side of the map, instead of only two. |
 | **Kick and invite buttons** | Every slot's kick button works and kicks that player, and every empty slot's invite button opens the friends list (the host sees them; the original game only wired one). The lobby is titled "Eight Player Campaign". |
 | **Battle result for allies** | Fixed: players who weren't in a battle were shown the *defender's* result. When your side attacked and won, your allies saw "defeat"; when it defended, they saw "victory". Now they see the result of the ally who fought. |
-| **Gift units to spectators** | With more than one spectator, gifted units could only ever go to the first one, and other spectators couldn't hand units back. Now each press of the gift button sends the selected units to the **next spectator in turn** (in join order), and any spectator can hand units back. With one spectator nothing changes. |
+| **Gift units to spectators** | Each press of the gift button sends the selected units to the **next spectator in turn** (in join order); only that player can command them, and they can hand units back. (The original game only handled one spectator: units went to the first, everyone could command them, or they were lost.) |
 | **Desync: save screen bug** | Opening the Save or Load screen switched that PC's maths and text rules to its Windows language for the rest of the session (e.g. decimal comma on German, Czech, French or Russian Windows), so it no longer matched the other players. This is why "only the host should save" helped. Fixed: those screens now only change how dates are shown. |
 | **Desync: floating-point drift** | The game never locked the CPU's floating-point settings, so anything that changed them on one PC (overlays, anti-virus, drivers, alt-tabbing) made that PC calculate slightly differently. Fixed: the settings are reset to the game's defaults every frame and every battle tick. |
 | **Desync recovery** | If a campaign still goes out of sync, the resync now starts by itself instead of waiting for someone to press OK (Cancel used to drop the player). |
@@ -42,7 +42,7 @@ Everyone must also end up with the same two hashes, or they can't join each othe
 
 | File | SHA-256 |
 |---|---|
-| `empire.retail.dll` | `24BBF6D225AB360F1BD47344C986DF97447B5176DE95A38FB9B34E55D3C32327` |
+| `empire.retail.dll` | `B57589E0FDA98F3AAB2E64CBCDA6C37E49F7CDD173013F8F26B7A66FB9784032` |
 | `data\eightplayer_coop.pack` | `983F63E02958AF253B911934680AEE736CED160B2BB9FC152023EBCF479853F5` |
 
 ## Before you play
@@ -78,29 +78,27 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 13. Load a 3+ player save: the Load screen lists every player.
 14. On the campaign map the host presses Ctrl+Shift+F9: the resync popup appears for everyone and the game carries on afterwards.
 
-## Fixed in v1.7: please test and report
-v1.7 fixes the 3+ player battle problems found in testing. These fixes are new, so please report how they go:
-- **Players not in a battle no longer close.** With 3 or more players, everyone not fighting was put into a "spectator" mode the original 2-player game never used, and the game closed itself. They now follow a player who is in the battle, the same way the original 2-player game handles it. This fixes battles involving player 3+, and human-vs-human battles in **head-to-head**.
-- **AI battles no longer close everyone's game, and co-op no longer allies you with every clan.** v1.6 put AI clans on the co-op team, which made them permanent allies (alliances couldn't be broken) and turned AI battles into multiplayer battles with no players. Only human players are on the co-op team now. **Start a new campaign:** saves made with v1.6 can still carry the wrong settings for AI clans.
-- **Leaving a battle early no longer drops you from the campaign** (non-host players with 3+ players were disconnected).
+## v1.8: please test and report
+**Fixed in v1.8:**
+- **Gifted units with several watchers.** The game only ever expected one watcher, so every watcher checked the *first* watcher's units: all of them could command units given to watcher #1, and units given to anyone else couldn't be commanded by anybody (lost). Now only the player a unit was given to can command it.
+- **Error log for instant closes.** When the game closes itself on an internal error, it now writes the reason to `eightplayer_errors.txt` in the game folder.
 
-If something still goes wrong, post in the [Discord](https://discord.gg/medh2d8nk), [open an issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md) or comment on the Steam Workshop page, and include:
-- how many players, game mode (co-op or head-to-head), and who was in the battle;
-- what happened and on whose screen (and when: battle announced, choosing attack/spectate, loading, during, after);
-- the battle type (field, siege, naval, reinforcements);
-- your MATCH CODE and any other mods enabled;
-- `eightplayer_crash.txt` from the game folder, if there is one.
+**Fixed in v1.7:** players outside a battle in co-op follow it instead of the game closing; AI clans are no longer co-op allies; leaving a battle early no longer drops you.
+
+**Still open: head-to-head battles between two players.** With 3+ players, when two players fight each other, the players not in the battle close. A human-vs-human battle with someone watching never happens in the original 2-player game. Until it's fixed, **auto-resolve battles between two human players in head-to-head games with 3+ players** (battles against the AI work). **If it happens, send `eightplayer_errors.txt`** from the game folder of a player whose game closed: it names the exact check that failed, so it can be fixed.
+
+Report in the [Discord](https://discord.gg/medh2d8nk), [open an issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md) or comment on the Steam Workshop page, with: how many players, co-op or head-to-head, who was in the battle, what happened on whose screen and when, the battle type, your MATCH CODE, and `eightplayer_errors.txt` / `eightplayer_crash.txt` if there are any.
 ## Known limitations - please report what you see
 The game was built for 2 players, so with 3–8 players some parts haven't been tested in real games yet:
 - Other 2-player limits may remain in parts not yet played: turn order, reinforcements joining battles, the end of a 3+ player campaign, diplomacy between humans in head-to-head.
 - With 3+ players, several players not in a battle could choose "play as AI" for the same AI army.
-- In head-to-head, a player fighting a battle may be able to gift units to a player watching it.
+- In head-to-head, a player fighting a battle may be able to gift units to a player watching it (once head-to-head battles work).
 - Watchers in head-to-head see the game's default battle result screen (nobody is allied).
 - Save names still only mention 2 players.
 - Campaigns started on v1.6 can keep wrong co-op settings for AI clans: start a new campaign.
 - More players means more chances of a desync, and the game always waits for the slowest connection. The automatic resync and the host's Ctrl+Shift+F9 key help.
 
-**If the game closes instantly with no error:** that isn't a crash, so no `eightplayer_crash.txt` is written. The game found a problem and closed itself. Please still report it with what happened, on whose screen and when ([Discord](https://discord.gg/medh2d8nk) or [GitHub issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md)).
+**If the game closes instantly with no error:** that isn't a crash, so no `eightplayer_crash.txt` is written: the game found a problem and closed itself. Since v1.8 the reason is saved in `eightplayer_errors.txt` in the game folder. Please report it with what happened, on whose screen and when ([Discord](https://discord.gg/medh2d8nk) or [GitHub issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md)).
 ## Not done yet
 - **Battle desyncs** no longer drop anyone, but the battle itself can't be resynced: the out-of-sync player's view may differ until the campaign map, where the host's state wins.
 - Two known causes are fixed (above); others may remain. Possible: Intel and AMD CPUs can give slightly different

@@ -23,6 +23,8 @@ Tools: Ghidra 12.1.4 headless (`re/ghidra_proj`; `re/q.ps1` runs `re/query.txt` 
 | Co-op team: FUN_1068e0e0 adds clans whose record [clan+6D8h] has campaign type [rec+74h] 5/6 (FUN_105cb5b0). v1.7: only HUMAN clans ([clan+6A0h]); a human record gets the co-op type when another human's is co-op. (v1.6 also did this for AI clans: start positions/saves give playable AI clans records, so every AI clan became a permanent co-op ally, and FUN_10602b20 then made AI battles MP battles.) | 1068E124 call retarget | `.s2mp` |
 | Players not in a battle, 3+ humans: FUN_105cefa0 (pending battle; local clan) handled exactly 2 humans (follow the human in the battle, 281E9h = 1; or FUN_105cbb50 battle kind: pending army +0CCh); any other count -> plain spectator of alliance 0/army 0, a path 2-player campaigns never reach and that closed the game | 105CF0A1 jne -> jb (count >= 2) | - |
 | Leaving a battle early (FUN_10f1f8d0, esi = session+8): non-host with > 2 players was disconnected (FUN_10f033e0); now only outside campaigns ([session+596D8h]) | 10F1F91E (5 bytes) jmp | `.s2mp` |
+| Gift ownership with several watchers: FUN_110fcc80 (gift arrived), 11101110 / 111011C0 (may command unit) use FUN_110de560 (FIRST spectator) for a watcher (281E9h); now the picker's watcher branch (own id) | 110FCCAE, 11101142, 111011EE call retargets | `.s2mp` + 9F |
+| Engine error log: FUN_100c19b0 formats the message (ebx = wide text) then calls the handler [117CC494]; appended as ASCII to eightplayer_errors.txt | 100C1B2B (7 bytes) jmp | `.s2mp` |
 | Invite buttons on slots 3..8 (frames invite_frame3..8) | 10FD5B70 (7 bytes) jmp; original wires only root.FindChild("button_invite") at 10FD5B36 | `.s2mp` + 13F |
 
 `.s2mp` is a new RX section appended after `.reloc` (one free header slot existed). Its code uses only relative
@@ -99,7 +101,11 @@ calls/jumps, and no relocation covers a patched byte (`verify_load.ps1` checks u
 Acting during another player's turn; mismatched mods or DirectX; naval battles and auto-resolve; diplomacy prompts;
 long campaigns; both players saving. No official root cause is known.
 
-### Head-to-head with 3+ players (fixed in v1.7, see the patch table)
+### Head-to-head with 3+ players
+- v1.7 fixed co-op (non-participants follow the battle). Testers (v1.7, 7 players): co-op battles work; head-to-head human-vs-human
+  battles still close every non-participant. Vanilla H2H uses the same follow mode (2p: the other human watches a battle vs AI unless
+  he plays the AI army, FUN_105cbb50 = campaign type 4 + choice), so the trigger is specific to 2 human fighters + a watcher.
+  Waiting for eightplayer_errors.txt (v1.8) to name the failing check.
 - Silent closes: the engine has many checks that log "Error: ..." via FUN_100c19b0 (message goes to the handler at
   117CC494, not shown) and then TerminateProcess(GetCurrentProcess(), 0): no crash, no WER entry, no crash file.
 - Reported (4-player mod, FotS H2H, no other mods): when two humans fight, the human not in the battle crashes to desktop; sieges work.

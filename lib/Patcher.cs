@@ -460,8 +460,75 @@ public static class EightPlayerPatcher {
 	const uint CloseHandleIat = 0x115A1158;
 	const uint CrashPrevFilterVa = 0x11CB1538;   // previous filter (third reserved .data dword)
 	const uint CrashInstalledVa = 0x11CB153C;    // filter installed (fourth)
-	public const string Version = "1.7";
+	public const string Version = "1.8";
 	static uint crashFilterAt;
+
+	// ---- engine error log ------------------------------------------------------------------------------
+	// Before the engine closes itself on an internal error (TerminateProcess, exit code 0: no crash, no Windows
+	// error), it formats a message through FUN_100c19b0 and hands it to a handler that shows nothing. This
+	// appends every such message as a line of text to eightplayer_errors.txt in the game folder, then
+	// continues exactly as before. Hooked after the message is formatted (ebx = wide text).
+	const uint ErrorMessageAt = 0x100C1B2B;      // add esp,1Ch / test eax,eax / je 100C1B7F (7 bytes)
+	const uint ErrorMessageNoHandler = 0x100C1B7F;
+	const uint ErrorMessageResume = 0x100C1B32;
+
+	static uint EmitErrorLog(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x83, 0xC4, 0x1C);                          // add esp,1Ch             (replaced)
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0x81, 0xEC, 0x10, 0x04, 0x00, 0x00);        // sub esp,410h  ([esp] written, [esp+4] length, [esp+8] text)
+		a.Raw(0x8B, 0xF3, 0x8D, 0x7C, 0x24, 0x08, 0x33, 0xC9);   // mov esi,ebx / lea edi,[esp+8] / xor ecx,ecx
+		a.Raw(0x85, 0xF6); a.J8(0x74, "end");             // no message
+		a.Mark("copy");                                   // wide -> ASCII, '?' for anything else
+		a.Raw(0x0F, 0xB7, 0x04, 0x4E);                    // movzx eax,word [esi+ecx*2]
+		a.Raw(0x85, 0xC0); a.J8(0x74, "end");
+		a.Raw(0x81, 0xF9, 0xF0, 0x03, 0x00, 0x00); a.J8(0x73, "end");   // cmp ecx,3F0h / jae end
+		a.Raw(0x3D, 0x80, 0x00, 0x00, 0x00); a.J8(0x72, "ascii");       // cmp eax,80h / jb ascii
+		a.Raw(0xB0, 0x3F);                                // mov al,'?'
+		a.Mark("ascii");
+		a.Raw(0x88, 0x04, 0x0F, 0x41);                    // mov [edi+ecx],al / inc ecx
+		a.J8(0xEB, "copy");
+		a.Mark("end");
+		a.Raw(0x66, 0xC7, 0x04, 0x0F, 0x0D, 0x0A);        // mov word [edi+ecx],0A0Dh   (CR LF)
+		a.Raw(0x83, 0xC1, 0x02, 0x89, 0x4C, 0x24, 0x04);  // add ecx,2 / mov [esp+4],ecx
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint B = a.Here;
+		a.Raw(0x5D);                                      // pop ebp
+		a.Raw(0x6A, 0x00, 0x68, 0x80, 0x00, 0x00, 0x00, 0x6A, 0x04, 0x6A, 0x00, 0x6A, 0x03, 0x6A, 0x04);   // 0, NORMAL, OPEN_ALWAYS, 0, share r/w, FILE_APPEND_DATA
+		int fileIdx = a.Bytes.Count + 2;
+		a.Raw(0x8D, 0x85, 0, 0, 0, 0, 0x50);              // lea eax,[ebp+file] / push eax
+		a.Raw(0x8B, 0x85); Imm(a, CreateFileAIat - B); a.Raw(0xFF, 0xD0);
+		a.Raw(0x83, 0xF8, 0xFF); a.J8(0x74, "done");
+		a.Raw(0x8B, 0xF0);                                // mov esi,eax
+		a.Raw(0x6A, 0x00);                                // push 0                  (overlapped)
+		a.Raw(0x8D, 0x44, 0x24, 0x04, 0x50);              // lea eax,[esp+4] / push eax   (written)
+		a.Raw(0xFF, 0x74, 0x24, 0x0C);                    // push [esp+0Ch]          (length)
+		a.Raw(0x8D, 0x44, 0x24, 0x14, 0x50);              // lea eax,[esp+14h] / push eax (text)
+		a.Raw(0x56);                                      // push esi
+		a.Raw(0x8B, 0x85); Imm(a, WriteFileIat - B); a.Raw(0xFF, 0xD0);
+		a.Raw(0x56);
+		a.Raw(0x8B, 0x85); Imm(a, CloseHandleIat - B); a.Raw(0xFF, 0xD0);
+		a.Mark("done");
+		a.Raw(0x81, 0xC4, 0x10, 0x04, 0x00, 0x00, 0x61); // add esp,410h / popad
+		a.Raw(0x85, 0xC0);                                // test eax,eax            (replaced)
+		a.J32("nohandler", 0x0F, 0x84);
+		a.Jmp(ErrorMessageResume);
+		a.Mark("nohandler");
+		a.Jmp(ErrorMessageNoHandler);
+		uint file = a.Here;
+		a.Bytes.AddRange(Encoding.ASCII.GetBytes("eightplayer_errors.txt")); a.Raw(0);
+		FixImm32(a, fileIdx, file - B);
+		a.Resolve();
+		return at;
+	}
+
+	// ---- gifted units with several watchers -------------------------------------------------------------
+	// A watching player ("ally spectate", setup+281E9h) decides "is this unit mine?" with FUN_110de560, which
+	// returns the FIRST spectator. Right with one watcher; with several, every watcher used spectator #1's unit
+	// list: all of them could command units given to spectator #1, and units given to anyone else belonged to
+	// nobody (lost). These three call sites now use the mod's picker, whose watcher branch returns the local
+	// player's own id (they are only reached when 281E9h is set).
+	static readonly uint[] OwnerCheckCalls = { 0x110FCCAE, 0x11101142, 0x111011EE };   // gift arrived / may command (x2)
 
 	static void Imm(Asm a, uint v) { a.Bytes.AddRange(BitConverter.GetBytes(v)); }
 
@@ -1290,6 +1357,10 @@ public static class EightPlayerPatcher {
 		PutJmp(AllyHookAt, allyAt, 12);
 		uint giftAt = EmitGiftPartnerPicker(s);
 		RedirectCall(GiftPickCall, 0x110DE560, giftAt);
+		foreach (uint c in OwnerCheckCalls) RedirectCall(c, 0x110DE560, giftAt);
+		uint errAt = EmitErrorLog(s);
+		ExpectBytes(ErrorMessageAt, 0x83, 0xC4, 0x1C, 0x85, 0xC0, 0x74, 0x4D);
+		PutJmp(ErrorMessageAt, errAt, 7);
 		ReserveDataDword(GiftCounterVa);
 		uint resyncAt = EmitAutoResync(s);
 		RedirectCall(ResyncNotifyCall, NotifyListeners, resyncAt);
