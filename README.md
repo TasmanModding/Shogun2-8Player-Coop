@@ -20,7 +20,7 @@ Builds on the 4-player campaign mod. Installing this one removes the 4-player mo
 | **Desync: floating-point drift** | The game never locked the CPU's floating-point settings, so anything that changed them on one PC (overlays, anti-virus, drivers, alt-tabbing) made that PC calculate slightly differently. Fixed: the settings are reset to the game's defaults every frame and every battle tick. |
 | **Desync recovery** | If a campaign still goes out of sync, the resync now starts by itself instead of waiting for someone to press OK (Cancel used to drop the player). |
 | **Host resync key: Ctrl+Shift+F9** | If the campaign looks wrong or is stuck (one PC stuck on an AI's turn while another shows a player's turn, armies in different places), the **host** presses **Ctrl+Shift+F9** on the campaign map. Everyone gets the host's copy of the campaign, the same way a detected desync is fixed. Wait for the resync popup to finish. It does nothing in battles or the menus, and nothing if a client presses it. |
-| **Crash reports** | If the game crashes, it writes `eightplayer_crash.txt` in the game folder (where the crash happened in the game's code). Send that file with your bug report: it lets the crash be fixed instead of guessed at. |
+| **Crash reports** | If the game crashes during a multiplayer game, it writes `eightplayer_crash.txt` in the game folder (where the crash happened in the game's code). Send that file with your bug report. An instant close with no error is not a crash and leaves no file: report it anyway. |
 | **Battle desync: no more kick** | A battle can't be resynced, so the game used to drop the out-of-sync player. Now the battle carries on for everyone. The out-of-sync player's view may drift (a unit alive on their screen that is dead for others). Back on the campaign map, the host's state is copied to everyone by the campaign resync. |
 
 ## Community
@@ -90,6 +90,17 @@ If something still goes wrong, post in the [Discord](https://discord.gg/medh2d8n
 - the battle type (field, siege, naval, reinforcements);
 - your MATCH CODE and any other mods enabled;
 - `eightplayer_crash.txt` from the game folder, if there is one.
+## Known limitations - please report what you see
+The game was built for 2 players, so with 3–8 players some parts haven't been tested in real games yet:
+- Other 2-player limits may remain in parts not yet played: turn order, reinforcements joining battles, the end of a 3+ player campaign, diplomacy between humans in head-to-head.
+- With 3+ players, several players not in a battle could choose "play as AI" for the same AI army.
+- In head-to-head, a player fighting a battle may be able to gift units to a player watching it.
+- Watchers in head-to-head see the game's default battle result screen (nobody is allied).
+- Save names still only mention 2 players.
+- Campaigns started on v1.6 can keep wrong co-op settings for AI clans: start a new campaign.
+- More players means more chances of a desync, and the game always waits for the slowest connection. The automatic resync and the host's Ctrl+Shift+F9 key help.
+
+**If the game closes instantly with no error:** that isn't a crash, so no `eightplayer_crash.txt` is written. The game found a problem and closed itself. Please still report it with what happened, on whose screen and when ([Discord](https://discord.gg/medh2d8nk) or [GitHub issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md)).
 ## Not done yet
 - **Battle desyncs** no longer drop anyone, but the battle itself can't be resynced: the out-of-sync player's view may differ until the campaign map, where the host's state wins.
 - Two known causes are fixed (above); others may remain. Possible: Intel and AMD CPUs can give slightly different
