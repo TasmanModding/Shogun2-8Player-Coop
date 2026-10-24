@@ -458,9 +458,14 @@ public static class EightPlayerPatcher {
 	const uint CreateFileAIat = 0x115A11A4;
 	const uint WriteFileIat = 0x115A1154;
 	const uint CloseHandleIat = 0x115A1158;
+	const uint LoadLibraryAIat = 0x115A1128;
+	const uint GetProcAddressIat = 0x115A1190;
+	const uint GetCurrentProcessIat = 0x115A1170;
+	const uint GetCurrentProcessIdIat = 0x115A1174;
+	const uint GetCurrentThreadIdIat = 0x115A11F4;
 	const uint CrashPrevFilterVa = 0x11CB1538;   // previous filter (third reserved .data dword)
 	const uint CrashInstalledVa = 0x11CB153C;    // filter installed (fourth)
-	public const string Version = "1.9";
+	public const string Version = "2.0";
 	static uint crashFilterAt;
 
 	// ---- engine error log ------------------------------------------------------------------------------
@@ -522,6 +527,35 @@ public static class EightPlayerPatcher {
 		return at;
 	}
 
+	// ---- "who controls my side" for a clan that isn't in the battle (head-to-head crash) -----------------
+	// Two crash dumps from a 3+ player head-to-head game (v1.7): access violation reading address 4 at 105B5128.
+	// FUN_105b50b0 (pending battle; clan) returns the clan controlling that clan's side: co-op team member or
+	// [side+4]. It reads the side from FUN_105b7b90 without a null check. The pre-battle screen (11185F5B) and
+	// a campaign UI panel (1115696D) ask it for the LOCAL clan; for a player who isn't in the battle - which only
+	// happens with 3+ players - there is no side, and the game crashed. In co-op the team branch happened to
+	// avoid the read in that panel; in head-to-head (empty co-op team) it always crashed.
+	// Fix: both lookups go through a stub; "not in the battle" returns a stand-in side whose controller is the
+	// clan itself ("my side is mine"), which matches no one in the battle, as for the original third party.
+	static readonly uint[] SideLookupCalls = { 0x105B50D7, 0x105B5120 };   // call FUN_105b7b90 (ebp = clan)
+	const uint BattleSideOfClan = 0x105B7B90;      // thiscall(battle; clan, bool*) ret 8
+	const uint StandInSideVa = 0x11CB1544;         // 2 dwords (sixth/seventh reserved): [+4] = controller
+
+	static uint EmitSideOrSelf(Asm a) {
+		uint at = a.Here;
+		a.Raw(0xFF, 0x74, 0x24, 0x08, 0xFF, 0x74, 0x24, 0x08);   // push [esp+8] / push [esp+8]  (same two arguments)
+		a.Call(BattleSideOfClan);                         // ecx = battle, unchanged
+		a.Raw(0x85, 0xC0); a.J8(0x75, "ret");             // in the battle: the real side
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint B = a.Here;
+		a.Raw(0x58);                                      // pop eax
+		a.Raw(0x05); Imm(a, StandInSideVa - B);           // add eax, stand-in - B
+		a.Raw(0x89, 0x68, 0x04);                          // mov [eax+4],ebp     (controller = the clan asked about)
+		a.Mark("ret");
+		a.Raw(0xC2, 0x08, 0x00);                          // ret 8
+		a.Resolve();
+		return at;
+	}
+
 	// ---- gifted units with several watchers -------------------------------------------------------------
 	// A watching player ("ally spectate", setup+281E9h) decides "is this unit mine?" with FUN_110de560, which
 	// returns the FIRST spectator. Right with one watcher; with several, every watcher used spectator #1's unit
@@ -545,6 +579,9 @@ public static class EightPlayerPatcher {
 		addStr("nl", "\r\n");
 		addStr("sp", " ");
 		addStr("file", "eightplayer_crash.txt");
+		addStr("dmp", "eightplayer_crash.dmp");
+		addStr("dbghelp", "dbghelp.dll");
+		addStr("mdwd", "MiniDumpWriteDump");
 
 		// hex8: eax -> 8 hex digits at [edi], edi advanced; keeps ecx/edx
 		uint hex8 = a.Here;
@@ -574,7 +611,7 @@ public static class EightPlayerPatcher {
 		// LONG WINAPI filter(EXCEPTION_POINTERS* ep)
 		crashFilterAt = a.Here;
 		a.Raw(0x55, 0x8B, 0xEC);                          // push ebp / mov ebp,esp
-		a.Raw(0x81, 0xEC, 0x10, 0x10, 0x00, 0x00);        // sub esp,1010h  (text buffer [ebp-1000h], locals below)
+		a.Raw(0x81, 0xEC, 0x20, 0x10, 0x00, 0x00);        // sub esp,1020h  (text buffer [ebp-1000h], locals below)
 		a.Raw(0x60);                                      // pushad
 		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
 		uint popAt = a.Here;
@@ -594,6 +631,16 @@ public static class EightPlayerPatcher {
 		}
 		puts1("stack");
 		ep(); a.Raw(0x8B, 0x40, 0x04, 0x8B, 0x90, 0xC4, 0x00, 0x00, 0x00);    // mov edx,[ctx+0C4h] (Esp)
+		// read at most up to the top of this thread's stack (TEB StackBase, fs:[4]), and at most 256 dwords
+		a.Raw(0x64, 0xA1, 0x04, 0x00, 0x00, 0x00);        // mov eax,fs:[4]
+		a.Raw(0x2B, 0xC2, 0xC1, 0xE8, 0x02);              // sub eax,edx / shr eax,2
+		a.Raw(0x3D, 0x00, 0x01, 0x00, 0x00); a.J8(0x76, "lim");   // cmp eax,256 / jbe lim
+		a.Raw(0xB8, 0x00, 0x01, 0x00, 0x00);              // mov eax,256
+		a.Mark("lim");
+		a.Raw(0x83, 0xF8, 0x01); a.J8(0x73, "lim1");      // at least 1 (esp itself is always readable)
+		a.Raw(0xB8, 0x01, 0x00, 0x00, 0x00);
+		a.Mark("lim1");
+		a.Raw(0x89, 0x85, 0xF0, 0xEF, 0xFF, 0xFF);        // mov [ebp-1010h],eax  (dwords to dump)
 		a.Raw(0x33, 0xC9);                                // xor ecx,ecx
 		a.Mark("row");
 		a.Raw(0xF6, 0xC1, 0x07);                          // test cl,7
@@ -604,7 +651,7 @@ public static class EightPlayerPatcher {
 		puts1("sp");
 		a.Mark("word");
 		a.Raw(0x8B, 0x04, 0x8A); a.Call(hex8);            // mov eax,[edx+ecx*4]
-		a.Raw(0x41, 0x83, 0xF9, 0x40);                    // inc ecx / cmp ecx,64
+		a.Raw(0x41, 0x3B, 0x8D, 0xF0, 0xEF, 0xFF, 0xFF);  // inc ecx / cmp ecx,[ebp-1010h]
 		a.J8(0x72, "row");                                // jb row
 		puts1("nl");
 		// write the file
@@ -626,31 +673,53 @@ public static class EightPlayerPatcher {
 		a.Raw(0x56);
 		a.Raw(0x8B, 0x83); Imm(a, CloseHandleIat - popAt); a.Raw(0xFF, 0xD0);
 		a.Mark("nofile");
-		// hand over to the previous filter (Steam's crash reporter, Windows)
-		a.Raw(0xC7, 0x85, 0xF4, 0xEF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00);   // mov dword [ebp-100Ch],0
-		a.Raw(0x8B, 0x83); Imm(a, CrashPrevFilterVa - popAt);                // mov eax,[prev]
-		a.Raw(0x85, 0xC0);
-		a.J8(0x74, "fin");
-		a.Raw(0xFF, 0x75, 0x08, 0xFF, 0xD0);              // push [ebp+8] / call eax
-		a.Raw(0x89, 0x85, 0xF4, 0xEF, 0xFF, 0xFF);        // mov [ebp-100Ch],eax
-		a.Mark("fin");
+		// a small minidump (threads, stacks, modules: MiniDumpNormal) next to the text report
+		a.Raw(0x8D, 0x83); Imm(a, str["dbghelp"] - popAt); a.Raw(0x50);          // lea eax,["dbghelp.dll"] / push eax
+		a.Raw(0x8B, 0x83); Imm(a, LoadLibraryAIat - popAt); a.Raw(0xFF, 0xD0);   // call [LoadLibraryA]
+		a.Raw(0x85, 0xC0); a.J32("nodump", 0x0F, 0x84);
+		a.Raw(0x8D, 0x8B); Imm(a, str["mdwd"] - popAt); a.Raw(0x51, 0x50);       // lea ecx,["MiniDumpWriteDump"] / push ecx / push eax
+		a.Raw(0x8B, 0x83); Imm(a, GetProcAddressIat - popAt); a.Raw(0xFF, 0xD0);
+		a.Raw(0x85, 0xC0); a.J32("nodump", 0x0F, 0x84);
+		a.Raw(0x8B, 0xF8);                                // mov edi,eax             (MiniDumpWriteDump)
+		a.Raw(0x6A, 0x00, 0x68, 0x80, 0x00, 0x00, 0x00, 0x6A, 0x02, 0x6A, 0x00, 0x6A, 0x00);   // 0, NORMAL, CREATE_ALWAYS, 0, no sharing
+		a.Raw(0x68, 0x00, 0x00, 0x00, 0x40);              // push GENERIC_WRITE
+		a.Raw(0x8D, 0x83); Imm(a, str["dmp"] - popAt); a.Raw(0x50);
+		a.Raw(0x8B, 0x83); Imm(a, CreateFileAIat - popAt); a.Raw(0xFF, 0xD0);
+		a.Raw(0x83, 0xF8, 0xFF); a.J32("nodump", 0x0F, 0x84);
+		a.Raw(0x8B, 0xF0);                                // mov esi,eax             (file)
+		a.Raw(0x8B, 0x83); Imm(a, GetCurrentThreadIdIat - popAt); a.Raw(0xFF, 0xD0);
+		a.Raw(0x89, 0x85, 0xE4, 0xEF, 0xFF, 0xFF);        // MINIDUMP_EXCEPTION_INFORMATION at [ebp-101Ch]: ThreadId
+		a.Raw(0x8B, 0x45, 0x08, 0x89, 0x85, 0xE8, 0xEF, 0xFF, 0xFF);   // ExceptionPointers = ep
+		a.Raw(0xC7, 0x85, 0xEC, 0xEF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00);   // ClientPointers = FALSE
+		a.Raw(0x6A, 0x00, 0x6A, 0x00);                    // CallbackParam, UserStreamParam
+		a.Raw(0x8D, 0x85, 0xE4, 0xEF, 0xFF, 0xFF, 0x50);  // &exception information
+		a.Raw(0x6A, 0x00, 0x56);                          // MiniDumpNormal, file
+		a.Raw(0x8B, 0x83); Imm(a, GetCurrentProcessIdIat - popAt); a.Raw(0xFF, 0xD0, 0x50);
+		a.Raw(0x8B, 0x83); Imm(a, GetCurrentProcessIat - popAt); a.Raw(0xFF, 0xD0, 0x50);
+		a.Raw(0xFF, 0xD7);                                // call MiniDumpWriteDump
+		a.Raw(0x56);
+		a.Raw(0x8B, 0x83); Imm(a, CloseHandleIat - popAt); a.Raw(0xFF, 0xD0);
+		a.Mark("nodump");
+		// end the process here: no hand-over to Steam's crash handler, which writes a 1-2 GB full memory dump
+		a.Raw(0xC7, 0x85, 0xF4, 0xEF, 0xFF, 0xFF, 0x01, 0x00, 0x00, 0x00);   // result = EXCEPTION_EXECUTE_HANDLER
 		a.Raw(0x61);                                      // popad
 		a.Raw(0x8B, 0x85, 0xF4, 0xEF, 0xFF, 0xFF);        // mov eax,[ebp-100Ch]
 		a.Raw(0x8B, 0xE5, 0x5D, 0xC2, 0x04, 0x00);        // mov esp,ebp / pop ebp / ret 4
 		a.Resolve();
 	}
 
-	// once, from the frame hook: SetUnhandledExceptionFilter(crash filter), remembering the previous one
+	// every frame (from the frame hook): SetUnhandledExceptionFilter(crash filter). Steam's tier0 registers its
+	// own handler after the mod's, which then never ran; re-registering each frame keeps the mod's first. A
+	// pointer swap, nothing measurable per frame. [prev] keeps the last other filter seen (informational).
 	static void EmitCrashFilterInstall(Asm a) {
 		a.Raw(0x60);                                      // pushad
 		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
 		uint popAt = a.Here;
 		a.Raw(0x5B);                                      // pop ebx
-		a.Raw(0x83, 0xBB); Imm(a, CrashInstalledVa - popAt); a.Raw(0x00);   // cmp dword [installed],0
-		a.J8(0x75, "done");
 		a.Raw(0xC7, 0x83); Imm(a, CrashInstalledVa - popAt); Imm(a, 1);     // mov dword [installed],1
-		a.Raw(0x8D, 0x83); Imm(a, crashFilterAt - popAt); a.Raw(0x50);      // lea eax,[filter] / push eax
+		a.Raw(0x8D, 0xB3); Imm(a, crashFilterAt - popAt); a.Raw(0x56);      // lea esi,[filter] / push esi
 		a.Raw(0x8B, 0x83); Imm(a, SetUnhandledExceptionFilterIat - popAt); a.Raw(0xFF, 0xD0);
+		a.Raw(0x3B, 0xC6); a.J8(0x74, "done");            // cmp eax,esi: ours was still in place
 		a.Raw(0x89, 0x83); Imm(a, CrashPrevFilterVa - popAt);               // mov [prev],eax
 		a.Mark("done");
 		a.Raw(0x61);                                      // popad
@@ -1399,6 +1468,8 @@ public static class EightPlayerPatcher {
 		uint giftAt = EmitGiftPartnerPicker(s);
 		RedirectCall(GiftPickCall, 0x110DE560, giftAt);
 		foreach (uint c in OwnerCheckCalls) RedirectCall(c, 0x110DE560, giftAt);
+		uint sideAt = EmitSideOrSelf(s);
+		foreach (uint c in SideLookupCalls) RedirectCall(c, BattleSideOfClan, sideAt);
 		uint errAt = EmitErrorLog(s);
 		ExpectBytes(ErrorMessageAt, 0x83, 0xC4, 0x1C, 0x85, 0xC0, 0x74, 0x4D);
 		PutJmp(ErrorMessageAt, errAt, 7);
@@ -1440,6 +1511,7 @@ public static class EightPlayerPatcher {
 		ReserveDataDword(CrashPrevFilterVa);
 		ReserveDataDword(CrashInstalledVa);
 		ReserveDataDword(ResyncPendingVa);
+		ReserveDataDword(StandInSideVa); ReserveDataDword(StandInSideVa + 4);
 		AddSection(".s2mp", s.Bytes);
 
 		File.WriteAllBytes(outPath, b);

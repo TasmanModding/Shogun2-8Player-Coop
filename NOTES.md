@@ -26,6 +26,8 @@ Tools: Ghidra 12.1.4 headless (`re/ghidra_proj`; `re/q.ps1` runs `re/query.txt` 
 | Gift ownership with several watchers: FUN_110fcc80 (gift arrived), 11101110 / 111011C0 (may command unit) use FUN_110de560 (FIRST spectator) for a watcher (281E9h); now the picker's watcher branch (own id) | 110FCCAE, 11101142, 111011EE call retargets | `.s2mp` + 9F |
 | Engine error log: FUN_100c19b0 formats the message (ebx = wide text) then calls the handler [117CC494]; appended as ASCII to eightplayer_errors.txt | 100C1B2B (7 bytes) jmp | `.s2mp` |
 | No desync kicks in a campaign (v1.9): handler stub also skips the kick when [session+596D8h] (campaign) and sets resync-pending (11CB1540); report stub skips when campaign or battle. Frame hook: pending -> FUN_10f058d0 (only succeeds in campaign state 3, not while switching back from a battle) then 0xAC force=2 | 10EE9A71 / 10EF9A87 stubs, frame stub | `.s2mp` |
+| H2H crash (2 dumps, v1.7: AV read 4 at 105B5128): FUN_105b50b0 (battle; clan) reads [FUN_105b7b90(clan)+4] unchecked; callers 11185F5B (pre-battle screen, local clan) and 1115696D (campaign UI). Non-participant clan -> null side. Stub returns a stand-in side (11CB1544, [+4] = the clan) | 105B50D7, 105B5120 call retargets | `.s2mp` |
+| Crash reporter v2.0: filter re-registered every frame (Steam tier0 replaced it), 256 stack dwords (capped at TEB StackBase fs:[4]), MiniDumpNormal via dbghelp -> eightplayer_crash.dmp (~0.5 MB), returns EXCEPTION_EXECUTE_HANDLER (no Steam 1-2 GB dump) | frame stub | `.s2mp` |
 | Invite buttons on slots 3..8 (frames invite_frame3..8) | 10FD5B70 (7 bytes) jmp; original wires only root.FindChild("button_invite") at 10FD5B36 | `.s2mp` + 13F |
 
 `.s2mp` is a new RX section appended after `.reloc` (one free header slot existed). Its code uses only relative
@@ -106,7 +108,7 @@ long campaigns; both players saving. No official root cause is known.
 - v1.7 fixed co-op (non-participants follow the battle). Testers (v1.7, 7 players): co-op battles work; head-to-head human-vs-human
   battles still close every non-participant. Vanilla H2H uses the same follow mode (2p: the other human watches a battle vs AI unless
   he plays the AI army, FUN_105cbb50 = campaign type 4 + choice), so the trigger is specific to 2 human fighters + a watcher.
-  Waiting for eightplayer_errors.txt (v1.8) to name the failing check.
+  Two crash dumps then showed it: see the FUN_105b50b0 row (fixed in v2.0).
 - Silent closes: the engine has many checks that log "Error: ..." via FUN_100c19b0 (message goes to the handler at
   117CC494, not shown) and then TerminateProcess(GetCurrentProcess(), 0): no crash, no WER entry, no crash file.
 - Reported (4-player mod, FotS H2H, no other mods): when two humans fight, the human not in the battle crashes to desktop; sieges work.
