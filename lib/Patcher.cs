@@ -460,7 +460,7 @@ public static class EightPlayerPatcher {
 	const uint CloseHandleIat = 0x115A1158;
 	const uint CrashPrevFilterVa = 0x11CB1538;   // previous filter (third reserved .data dword)
 	const uint CrashInstalledVa = 0x11CB153C;    // filter installed (fourth)
-	public const string Version = "1.8";
+	public const string Version = "1.9";
 	static uint crashFilterAt;
 
 	// ---- engine error log ------------------------------------------------------------------------------
@@ -663,6 +663,7 @@ public static class EightPlayerPatcher {
 		uint at = a.Here;
 		EmitCrashFilterInstall(a);
 		EmitResyncKeyPoll(a);
+		EmitPendingResync(a);
 		EmitPinFloatModes(a);
 		a.Jmp(MultiplayerUpdate);
 		return at;
@@ -692,20 +693,60 @@ public static class EightPlayerPatcher {
 	const uint ReportKickResume = 0x10EF9A8D;
 	const uint ReportKickSkip = 0x10EF9B29;
 
+	// v1.9: no desync kicks anywhere in a campaign. Testers (7 players) were dropped right after a co-op battle:
+	// back on the map the campaign desync was detected while the game was still switching back from the battle,
+	// FUN_10f058d0 couldn't start a resync yet (it needs the campaign state), and the kick followed at once.
+	// Now, in a campaign ([session+596D8h], also set during campaign battles) the kick is skipped and a
+	// "resync pending" flag is set; the frame hook (EmitPendingResync) starts the resync as soon as the game is
+	// back on the campaign map and tells every PC to join (as Ctrl+Shift+F9). Custom battles keep the original rules.
+	const uint ResyncPendingVa = 0x11CB1540;     // fifth reserved .data dword
+
 	static uint EmitBattleNoKick(Asm a) {
 		uint at = a.Here;
+		a.Raw(0x83, 0xBF, 0xD4, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [edi+596D4h],0   (campaign?  edi = session+4)
+		a.J8(0x75, "campaign");
 		a.Raw(0x83, 0xBF, 0xCC, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [edi+596CCh],0   (battle running?)
 		a.J32("skip", 0x0F, 0x85);                        // jne -> no kick
 		a.Raw(0x8B, 0x8F, 0x74, 0xBE, 0x02, 0x00);        // mov ecx,[edi+2BE74h]          (replaced instruction)
 		a.Jmp(DesyncKickResume);
+		a.Mark("campaign");                               // no kick; resync as soon as possible
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint B = a.Here;
+		a.Raw(0x58);                                      // pop eax
+		a.Raw(0xC7, 0x80); Imm(a, ResyncPendingVa - B); Imm(a, 1);   // mov dword [eax+pending],1
 		a.Mark("skip");
 		a.Jmp(DesyncKickSkip);
 		a.Resolve();
 		return at;
 	}
 
+	// once per frame: a desync was noticed but no resync could start then -> start it now if possible, and make
+	// every PC join (0xAC "force"). Runs inside the frame hook's pushad block ([ebp+58h] = session).
+	static void EmitPendingResync(Asm a) {
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint B = a.Here;
+		a.Raw(0x5B);                                      // pop ebx
+		a.Raw(0x83, 0xBB); Imm(a, ResyncPendingVa - B); a.Raw(0x00);   // cmp dword [pending],0
+		a.J8(0x74, "done");
+		a.Raw(0x8B, 0x4D, 0x58, 0x85, 0xC9); a.J8(0x74, "done");       // mov ecx,[ebp+58h] / test ecx,ecx (session)
+		a.Raw(0x8B, 0xB1, 0x78, 0xBE, 0x02, 0x00);        // mov esi,[ecx+2BE78h]    (resync state)
+		a.Raw(0x85, 0xF6); a.J8(0x74, "done");
+		a.Raw(0x83, 0x7E, 0x30, 0x00); a.J8(0x75, "clear");             // a resync is already running
+		a.Raw(0x51, 0x8B, 0xCE); a.Call(StartResync);     // push session / ecx = resync
+		a.Raw(0x83, 0x7E, 0x30, 0x00); a.J8(0x74, "done");             // not on the campaign map yet: retry next frame
+		a.Raw(0x8B, 0x4D, 0x58, 0x6A, 0x02); a.Call(SendResyncAnswer); // everyone joins
+		a.Mark("clear");
+		a.Raw(0xC7, 0x83); Imm(a, ResyncPendingVa - B); Imm(a, 0);     // mov dword [pending],0
+		a.Mark("done");
+		a.Raw(0x61);                                      // popad
+		a.Resolve();
+	}
+
 	static uint EmitReportNoKick(Asm a) {
 		uint at = a.Here;
+		a.Raw(0x83, 0xBB, 0xD8, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [ebx+596D8h],0   (campaign)
+		a.J32("skip", 0x0F, 0x85);                        // jne -> no kick
 		a.Raw(0x83, 0xBB, 0xD0, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [ebx+596D0h],0
 		a.J32("skip", 0x0F, 0x85);                        // jne -> no kick
 		a.Raw(0x55, 0x57);                                // push ebp / push edi            (replaced instructions)
@@ -1398,6 +1439,7 @@ public static class EightPlayerPatcher {
 		PutJmp(MemberUpdateAt, titleAt, 6);
 		ReserveDataDword(CrashPrevFilterVa);
 		ReserveDataDword(CrashInstalledVa);
+		ReserveDataDword(ResyncPendingVa);
 		AddSection(".s2mp", s.Bytes);
 
 		File.WriteAllBytes(outPath, b);

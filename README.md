@@ -18,7 +18,7 @@ Builds on the 4-player campaign mod. Installing this one removes the 4-player mo
 | **Gift units to spectators** | Each press of the gift button sends the selected units to the **next spectator in turn** (in join order); only that player can command them, and they can hand units back. (The original game only handled one spectator: units went to the first, everyone could command them, or they were lost.) |
 | **Desync: save screen bug** | Opening the Save or Load screen switched that PC's maths and text rules to its Windows language for the rest of the session (e.g. decimal comma on German, Czech, French or Russian Windows), so it no longer matched the other players. This is why "only the host should save" helped. Fixed: those screens now only change how dates are shown. |
 | **Desync: floating-point drift** | The game never locked the CPU's floating-point settings, so anything that changed them on one PC (overlays, anti-virus, drivers, alt-tabbing) made that PC calculate slightly differently. Fixed: the settings are reset to the game's defaults every frame and every battle tick. |
-| **Desync recovery** | If a campaign still goes out of sync, the resync now starts by itself instead of waiting for someone to press OK (Cancel used to drop the player). |
+| **Desync recovery** | If a campaign goes out of sync, nobody is dropped: the resync starts by itself (as soon as everyone is back on the campaign map, e.g. after a battle) and every player joins it. |
 | **Host resync key: Ctrl+Shift+F9** | If the campaign looks wrong or is stuck (one PC stuck on an AI's turn while another shows a player's turn, armies in different places), the **host** presses **Ctrl+Shift+F9** on the campaign map. Everyone gets the host's copy of the campaign, the same way a detected desync is fixed. Wait for the resync popup to finish. It does nothing in battles or the menus, and nothing if a client presses it. |
 | **Crash reports** | If the game crashes during a multiplayer game, it writes `eightplayer_crash.txt` in the game folder (where the crash happened in the game's code). Send that file with your bug report. An instant close with no error is not a crash and leaves no file: report it anyway. |
 | **Battle desync: no more kick** | A battle can't be resynced, so the game used to drop the out-of-sync player. Now the battle carries on for everyone. The out-of-sync player's view may drift (a unit alive on their screen that is dead for others). Back on the campaign map, the host's state is copied to everyone by the campaign resync. |
@@ -42,7 +42,7 @@ Everyone must also end up with the same two hashes, or they can't join each othe
 
 | File | SHA-256 |
 |---|---|
-| `empire.retail.dll` | `B57589E0FDA98F3AAB2E64CBCDA6C37E49F7CDD173013F8F26B7A66FB9784032` |
+| `empire.retail.dll` | `C58F273F2E6D0A18F6AF6CA756D0812496FF75FB9C222038DEC94919FF493084` |
 | `data\eightplayer_coop.pack` | `983F63E02958AF253B911934680AEE736CED160B2BB9FC152023EBCF479853F5` |
 
 ## Before you play
@@ -78,14 +78,15 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 13. Load a 3+ player save: the Load screen lists every player.
 14. On the campaign map the host presses Ctrl+Shift+F9: the resync popup appears for everyone and the game carries on afterwards.
 
-## v1.8: please test and report
-**Fixed in v1.8:**
-- **Gifted units with several watchers.** The game only ever expected one watcher, so every watcher checked the *first* watcher's units: all of them could command units given to watcher #1, and units given to anyone else couldn't be commanded by anybody (lost). Now only the player a unit was given to can command it.
-- **Error log for instant closes.** When the game closes itself on an internal error, it now writes the reason to `eightplayer_errors.txt` in the game folder.
+## v1.9: please test and report
+**Fixed in v1.9:**
+- **Players dropped after a battle.** When a co-op battle ended, a desync was found while the game was still switching back to the campaign map. The resync couldn't start yet, so the game dropped the player at once (before anyone could press Ctrl+Shift+F9). Now nobody is dropped for a desync during a campaign: the resync starts by itself as soon as everyone is back on the map, and every player joins it.
 
-**Fixed in v1.7:** players outside a battle in co-op follow it instead of the game closing; AI clans are no longer co-op allies; leaving a battle early no longer drops you.
+**Fixed in v1.8:** gifted units belong only to the player they were given to; the reason for an instant close is saved in `eightplayer_errors.txt`.
 
-**Still open: head-to-head battles between two players.** With 3+ players, when two players fight each other, the players not in the battle close. A human-vs-human battle with someone watching never happens in the original 2-player game. Until it's fixed, **auto-resolve battles between two human players in head-to-head games with 3+ players** (battles against the AI work). **If it happens, send `eightplayer_errors.txt`** from the game folder of a player whose game closed: it names the exact check that failed, so it can be fixed.
+**Fixed in v1.7:** players outside a co-op battle follow it instead of the game closing; AI clans are no longer co-op allies; leaving a battle early no longer drops you.
+
+**Still open: head-to-head battles between two players.** With 3+ players, when two players fight each other, the players not in the battle close. Until it's fixed, **auto-resolve battles between two human players in head-to-head games with 3+ players** (battles against the AI work). **If it happens, send `eightplayer_errors.txt`** from the game folder of a player whose game closed.
 
 Report in the [Discord](https://discord.gg/medh2d8nk), [open an issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md) or comment on the Steam Workshop page, with: how many players, co-op or head-to-head, who was in the battle, what happened on whose screen and when, the battle type, your MATCH CODE, and `eightplayer_errors.txt` / `eightplayer_crash.txt` if there are any.
 ## Known limitations - please report what you see

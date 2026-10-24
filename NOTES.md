@@ -25,6 +25,7 @@ Tools: Ghidra 12.1.4 headless (`re/ghidra_proj`; `re/q.ps1` runs `re/query.txt` 
 | Leaving a battle early (FUN_10f1f8d0, esi = session+8): non-host with > 2 players was disconnected (FUN_10f033e0); now only outside campaigns ([session+596D8h]) | 10F1F91E (5 bytes) jmp | `.s2mp` |
 | Gift ownership with several watchers: FUN_110fcc80 (gift arrived), 11101110 / 111011C0 (may command unit) use FUN_110de560 (FIRST spectator) for a watcher (281E9h); now the picker's watcher branch (own id) | 110FCCAE, 11101142, 111011EE call retargets | `.s2mp` + 9F |
 | Engine error log: FUN_100c19b0 formats the message (ebx = wide text) then calls the handler [117CC494]; appended as ASCII to eightplayer_errors.txt | 100C1B2B (7 bytes) jmp | `.s2mp` |
+| No desync kicks in a campaign (v1.9): handler stub also skips the kick when [session+596D8h] (campaign) and sets resync-pending (11CB1540); report stub skips when campaign or battle. Frame hook: pending -> FUN_10f058d0 (only succeeds in campaign state 3, not while switching back from a battle) then 0xAC force=2 | 10EE9A71 / 10EF9A87 stubs, frame stub | `.s2mp` |
 | Invite buttons on slots 3..8 (frames invite_frame3..8) | 10FD5B70 (7 bytes) jmp; original wires only root.FindChild("button_invite") at 10FD5B36 | `.s2mp` + 13F |
 
 `.s2mp` is a new RX section appended after `.reloc` (one free header slot existed). Its code uses only relative
