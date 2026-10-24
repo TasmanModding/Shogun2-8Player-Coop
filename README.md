@@ -9,7 +9,10 @@ Builds on the 4-player campaign mod. Installing this one removes the 4-player mo
 | | |
 |---|---|
 | **Up to 8 players** | The multiplayer campaign lobby has 8 player slots (two rows, 4 each side of the map) and the host session accepts 8 players. 8 is the engine's limit: its multiplayer battles are built for at most 8 (4v4). |
-| **Player count** | The lobby title shows how many players have joined, e.g. "Eight Player Campaign (3/8)". |
+| **Player count** | The lobby title shows how many players have joined, e.g. "Eight Player Campaign (3/8)". The Campaign Games list shows each game's players under its status, e.g. "Open" / "3/8". |
+| **Resume with different players** | A saved campaign no longer needs exactly the same players. Players from the save get their own clan back; anyone new takes over the clan of a missing player (in the order they joined). Anyone can host a save under "Resume as Host", so the campaign carries on if the original host can't make it. |
+| **Missing players: AI takes over** | Resume a save with someone missing and the AI plays their clan. Their clan stays reserved for them in every save, and when they join a later rehost they get it back. |
+| **Save names** | With 3+ players, saves are named after everyone, e.g. "Ann, Bob, Cat, Dan: Summer 1550", instead of only two players. |
 | **Co-op team for every player** | In co-op, every human player is on the co-op team (can't attack each other, shared co-op rules), not just players 1 and 2. AI clans are never on it: you can ally with them, or break alliances, normally. |
 | **Battles with 3–8 players** | Players who aren't in a battle follow a player who is (as in the 2-player game) instead of the game closing. Works in co-op and in head-to-head, where any two players can fight each other. Leaving a battle early no longer drops you from the campaign. |
 | **Load screen shows every player** | Selecting a multiplayer save lists all its players (clan and name), four down each side of the map, instead of only two. |
@@ -42,7 +45,7 @@ Everyone must also end up with the same two hashes, or they can't join each othe
 
 | File | SHA-256 |
 |---|---|
-| `empire.retail.dll` | `9A9D5330E9A9C77784F630DD3333EF254DE6CA48CE3AFD71729E930C6B812DFA` |
+| `empire.retail.dll` | `971C7A955B045433F54161126A6866B3F37541A90CB23B2F3C88DB9A8ECD2280` |
 | `data\eightplayer_coop.pack` | `983F63E02958AF253B911934680AEE736CED160B2BB9FC152023EBCF479853F5` |
 
 ## Before you play
@@ -77,12 +80,23 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 12. A non-host player retreats from a battle (or leaves it early): they stay in the campaign.
 13. Load a 3+ player save: the Load screen lists every player.
 14. On the campaign map the host presses Ctrl+Shift+F9: the resync popup appears for everyone and the game carries on afterwards.
+15. Multiplayer → Campaign Games: an open game shows its player count (e.g. "3/8") under "Open".
+16. Resume a 3+ player save with one player swapped for someone new: the new player gets the missing player's clan.
+17. Resume a save with a different host (not the original one): it works.
+18. Resume a save with one player missing: a few seconds after the map appears, their clan is AI-controlled. Play a turn and save.
+19. Rehost that save with the missing player back: they get their own clan back and control it again.
+20. Save a 3+ player game: the save is named after every player.
 
-## v1.10: please test and report
-**Fixed in v1.10:**
-- **Head-to-head crash.** With 3+ players, when two players fought each other, everyone else crashed. Crash dumps from testers showed the cause: the game asks "who controls my side of the battle?" for every player, assuming they're in the battle. For a player who isn't (which only happens with 3+ players), it read an empty side and crashed. Players not in a battle now get "nobody in this battle", as the original game's one non-fighting player does. The same bug could also hit co-op.
-- **Small crash logs.** A crash now leaves `eightplayer_crash.txt` (a few KB) and `eightplayer_crash.dmp` (a small dump, well under 1 MB) in the game folder, instead of Steam's 1–2 GB memory dump. Send both with a bug report.
+## v1.11: please test and report
+**New in v1.11:**
+- **Player counts in the Campaign Games list.** Each game shows how many players are in it, e.g. "Open" with "3/8" underneath.
+- **Resume a save with different players.** Players from the save get their own clan; anyone new takes over a missing player's clan. Anyone can host the save.
+- **Missing players: AI takes over.** If someone can't make it, the AI plays their clan. Their clan stays reserved for them, and they get it back when they join a later rehost.
+- **Save names list everyone** with 3+ players.
 
+Please test steps 15–20 of the test plan above and tell us what happens.
+
+**Fixed in v1.10:** head-to-head crash for players not in a battle; small crash logs instead of Steam's 1–2 GB dumps.
 **Fixed in v1.9:** nobody is dropped for a desync during a campaign; the resync starts by itself once everyone is back on the map.
 **Fixed in v1.8:** gifted units belong only to the player they were given to; the reason for an instant close is saved in `eightplayer_errors.txt`.
 **Fixed in v1.7:** players outside a co-op battle follow it; AI clans are no longer co-op allies; leaving a battle early keeps you in the campaign.
@@ -94,7 +108,10 @@ The game was built for 2 players, so with 3–8 players some parts haven't been 
 - With 3+ players, several players not in a battle could choose "play as AI" for the same AI army.
 - In head-to-head, a player fighting a battle may be able to gift units to a player watching it.
 - Watchers in head-to-head see the game's default battle result screen (nobody is allied).
-- Save names still only mention 2 players.
+- Resumed games can be joined by anyone who finds them: use a password or friends-only if you don't want strangers taking a missing player's clan.
+- When a save is resumed with someone missing, their clan is still human for a few seconds after the map appears, until the AI takes over. Same when a player returns: their clan is AI for a few seconds.
+- New players get missing players' clans in join order; there's no way to pick which one yet.
+- If someone drops out of a campaign that has never been resumed, the AI takes their clan but it isn't reserved: they can't reclaim it on the next rehost.
 - Campaigns started on v1.6 can keep wrong co-op settings for AI clans: start a new campaign.
 - More players means more chances of a desync, and the game always waits for the slowest connection. The automatic resync and the host's Ctrl+Shift+F9 key help.
 

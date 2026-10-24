@@ -465,7 +465,7 @@ public static class EightPlayerPatcher {
 	const uint GetCurrentThreadIdIat = 0x115A11F4;
 	const uint CrashPrevFilterVa = 0x11CB1538;   // previous filter (third reserved .data dword)
 	const uint CrashInstalledVa = 0x11CB153C;    // filter installed (fourth)
-	public const string Version = "1.10";
+	public const string Version = "1.11";
 	static uint crashFilterAt;
 
 	// ---- engine error log ------------------------------------------------------------------------------
@@ -554,6 +554,589 @@ public static class EightPlayerPatcher {
 		a.Raw(0xC2, 0x08, 0x00);                          // ret 8
 		a.Resolve();
 		return at;
+	}
+
+	// ---- player count in the Campaign Games list -----------------------------------------------------------
+	// FUN_10ff5210 builds a list row's details from the Steam lobby (ebx): members byte [+9Ch], limit [+38h],
+	// lobby id [+78h..7Fh]. It only keeps "full" (count == limit), so the count is recorded in a small table
+	// keyed by lobby id. FUN_110499f0 (row update; ebp = details, id at [+80h..87h]) sets the Status cell's
+	// state (open / full / in-progress); after it the cell's own text gets a second line "3/8". The text before
+	// any newline is kept, so the localised word stays and repeated updates don't stack.
+	const uint LobbyRecordAt = 0x10FF5337;         // cmp dword ptr [ebx+88h],1 (7 bytes)
+	const uint LobbyRecordResume = 0x10FF533E;
+	const uint StatusStateCall = 0x11049DF4;       // call SetState for the Status cell (ecx = cell, ebp = details)
+	const uint SetState = 0x10F9BF20;              // thiscall(component; string* state) ret 4
+	const uint WStrFromRange = 0x100ED580;         // thiscall(wstring*; const wchar_t*, ushort len) ret 8
+	const uint LobbyCursorVa = 0x11CB15FC;         // next slot to reuse
+	const uint LobbyTableVa = 0x11CB1600;          // 32 x {id lo, id hi, members, limit}
+	const int LobbySlots = 32;
+
+	static uint EmitLobbyCountRecord(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint B = a.Here;
+		a.Raw(0x5E);                                      // pop esi
+		a.Raw(0x81, 0xC6); Imm(a, LobbyTableVa - B);      // add esi, table - B
+		a.Raw(0x8B, 0x43, 0x78);                          // mov eax,[ebx+78h]      (lobby id)
+		a.Raw(0x8B, 0x53, 0x7C);                          // mov edx,[ebx+7Ch]
+		a.Raw(0x8B, 0xC8, 0x0B, 0xCA);                    // mov ecx,eax / or ecx,edx
+		a.J8(0x74, "done");
+		a.Raw(0x8B, 0xFE);                                // mov edi,esi
+		a.Raw(0xB9); Imm(a, (uint)LobbySlots);            // mov ecx,slots
+		a.Mark("find");
+		a.Raw(0x39, 0x07); a.J8(0x75, "next");            // cmp [edi],eax
+		a.Raw(0x39, 0x57, 0x04); a.J8(0x74, "store");     // cmp [edi+4],edx
+		a.Mark("next");
+		a.Raw(0x83, 0xC7, 0x10);                          // add edi,10h
+		a.J8(0xE2, "find");                               // loop
+		a.Raw(0x8B, 0x4E, 0xFC);                          // mov ecx,[esi-4]        (cursor)
+		a.Raw(0x8B, 0xF9);                                // mov edi,ecx
+		a.Raw(0x83, 0xE7, (byte)(LobbySlots - 1));        // and edi,slots-1
+		a.Raw(0xC1, 0xE7, 0x04);                          // shl edi,4
+		a.Raw(0x03, 0xFE);                                // add edi,esi
+		a.Raw(0x41, 0x89, 0x4E, 0xFC);                    // inc ecx / mov [esi-4],ecx
+		a.Raw(0x89, 0x07, 0x89, 0x57, 0x04);              // mov [edi],eax / mov [edi+4],edx
+		a.Mark("store");
+		a.Raw(0x0F, 0xB6, 0x8B, 0x9C, 0x00, 0x00, 0x00);  // movzx ecx,byte ptr [ebx+9Ch]   (members)
+		a.Raw(0x89, 0x4F, 0x08);                          // mov [edi+8],ecx
+		a.Raw(0x8B, 0x4B, 0x38);                          // mov ecx,[ebx+38h]      (limit)
+		a.Raw(0x89, 0x4F, 0x0C);                          // mov [edi+0Ch],ecx
+		a.Mark("done");
+		a.Raw(0x61);                                      // popad
+		a.Raw(0x83, 0xBB, 0x88, 0x00, 0x00, 0x00, 0x01);  // cmp dword ptr [ebx+88h],1   (replaced)
+		a.Jmp(LobbyRecordResume);
+		a.Resolve();
+		return at;
+	}
+
+	// writes eax (clamped to 0..99) as UTF-16 digits at [ebx], advancing ebx
+	static void EmitWideNumber(Asm a, string tag) {
+		a.Raw(0x83, 0xF8, 0x63); a.J8(0x76, tag + "_le");  // cmp eax,99 / jbe
+		a.Raw(0xB8, 0x63, 0x00, 0x00, 0x00);              // mov eax,99
+		a.Mark(tag + "_le");
+		a.Raw(0x83, 0xF8, 0x0A); a.J8(0x72, tag + "_one"); // cmp eax,10 / jb
+		a.Raw(0x33, 0xD2, 0xB9, 0x0A, 0x00, 0x00, 0x00);  // xor edx,edx / mov ecx,10
+		a.Raw(0xF7, 0xF1);                                // div ecx
+		a.Raw(0x83, 0xC0, 0x30, 0x66, 0x89, 0x03);        // add eax,'0' / mov [ebx],ax
+		a.Raw(0x83, 0xC3, 0x02, 0x8B, 0xC2);              // add ebx,2 / mov eax,edx
+		a.Mark(tag + "_one");
+		a.Raw(0x83, 0xC0, 0x30, 0x66, 0x89, 0x03);        // add eax,'0' / mov [ebx],ax
+		a.Raw(0x83, 0xC3, 0x02);                          // add ebx,2
+	}
+
+	static uint EmitStatusCount(Asm a) {
+		// thiscall(cell; state name) ret 4, in place of SetState; ebp = the row's details
+		uint at = a.Here;
+		a.Raw(0x51);                                      // push ecx
+		a.Raw(0xFF, 0x74, 0x24, 0x08);                    // push [esp+8]
+		a.Call(SetState);
+		a.Raw(0x59);                                      // pop ecx                (cell)
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0x83, 0xEC, 0x60);                          // sub esp,60h  ([esp] text, [esp+40h] wstring)
+		a.Raw(0x8B, 0xF1);                                // mov esi,ecx
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint B = a.Here;
+		a.Raw(0x5F);                                      // pop edi
+		a.Raw(0x81, 0xC7); Imm(a, LobbyTableVa - B);      // add edi, table - B
+		a.Raw(0x8B, 0x85, 0x80, 0x00, 0x00, 0x00);        // mov eax,[ebp+80h]      (lobby id)
+		a.Raw(0x8B, 0x95, 0x84, 0x00, 0x00, 0x00);        // mov edx,[ebp+84h]
+		a.Raw(0x8B, 0xC8, 0x0B, 0xCA);                    // mov ecx,eax / or ecx,edx
+		a.J32("out", 0x0F, 0x84);
+		a.Raw(0xB9); Imm(a, (uint)LobbySlots);            // mov ecx,slots
+		a.Mark("find");
+		a.Raw(0x39, 0x07); a.J8(0x75, "next");            // cmp [edi],eax
+		a.Raw(0x39, 0x57, 0x04); a.J8(0x74, "found");     // cmp [edi+4],edx
+		a.Mark("next");
+		a.Raw(0x83, 0xC7, 0x10);                          // add edi,10h
+		a.J8(0xE2, "find");                               // loop
+		a.J32("out", 0xE9);                               // jmp out          (not in the table)
+		a.Mark("found");
+		a.Raw(0x83, 0x7F, 0x0C, 0x00);                    // cmp dword ptr [edi+0Ch],0   (no limit: leave it)
+		a.J32("out", 0x0F, 0x84);
+		a.Raw(0x8B, 0x9E, 0xB8, 0x00, 0x00, 0x00);        // mov ebx,[esi+0B8h]     (current state)
+		a.Raw(0x85, 0xDB); a.J32("out", 0x0F, 0x84);
+		a.Raw(0x0F, 0xB7, 0x4B, 0x34);                    // movzx ecx,word ptr [ebx+34h]  (text length)
+		a.Raw(0x8B, 0x53, 0x40);                          // mov edx,[ebx+40h]      (text)
+		a.Raw(0x85, 0xD2); a.J32("out", 0x0F, 0x84);
+		a.Raw(0x83, 0xF9, 0x14); a.J8(0x76, "short");     // cmp ecx,20 / jbe
+		a.Raw(0xB9, 0x14, 0x00, 0x00, 0x00);              // mov ecx,20
+		a.Mark("short");
+		a.Raw(0x8D, 0x1C, 0x24);                          // lea ebx,[esp]
+		a.Mark("copy");
+		a.J8(0xE3, "copied");                             // jecxz
+		a.Raw(0x0F, 0xB7, 0x02);                          // movzx eax,word ptr [edx]
+		a.Raw(0x83, 0xF8, 0x0A); a.J8(0x74, "copied");    // stop at a newline (our own line)
+		a.Raw(0x66, 0x89, 0x03);                          // mov [ebx],ax
+		a.Raw(0x83, 0xC3, 0x02, 0x83, 0xC2, 0x02, 0x49);  // add ebx,2 / add edx,2 / dec ecx
+		a.J8(0xEB, "copy");
+		a.Mark("copied");
+		a.Raw(0x3B, 0xDC); a.J8(0x76, "trimmed");         // cmp ebx,esp / jbe
+		a.Raw(0x66, 0x83, 0x7B, 0xFE, 0x20);              // cmp word ptr [ebx-2],' '
+		a.J8(0x75, "trimmed");
+		a.Raw(0x83, 0xEB, 0x02); a.J8(0xEB, "copied");    // sub ebx,2
+		a.Mark("trimmed");
+		a.Raw(0x3B, 0xDC); a.J32("out", 0x0F, 0x84);      // cmp ebx,esp: no word to keep, leave it
+		a.Raw(0x66, 0xC7, 0x03, 0x0A, 0x00, 0x83, 0xC3, 0x02);   // mov word [ebx],'\n' / add ebx,2
+		a.Raw(0x8B, 0x47, 0x08);                          // mov eax,[edi+8]        (members)
+		EmitWideNumber(a, "count");
+		a.Raw(0x66, 0xC7, 0x03, 0x2F, 0x00, 0x83, 0xC3, 0x02);   // mov word [ebx],'/' / add ebx,2
+		a.Raw(0x8B, 0x47, 0x0C);                          // mov eax,[edi+0Ch]      (limit)
+		EmitWideNumber(a, "limit");
+		a.Raw(0x2B, 0xDC, 0xD1, 0xEB);                    // sub ebx,esp / shr ebx,1   (length)
+		a.Raw(0x53);                                      // push ebx
+		a.Raw(0x8D, 0x44, 0x24, 0x04, 0x50);              // lea eax,[esp+4] / push eax
+		a.Raw(0x8D, 0x4C, 0x24, 0x48);                    // lea ecx,[esp+48h]      (wstring)
+		a.Call(WStrFromRange);
+		a.Raw(0x6A, 0x00);                                // push 0                 (current state only)
+		a.Raw(0x8D, 0x44, 0x24, 0x44, 0x50);              // lea eax,[esp+44h] / push eax
+		a.Raw(0x8B, 0xCE);                                // mov ecx,esi
+		a.Call(SetText);
+		a.Raw(0x8D, 0x4C, 0x24, 0x40);                    // lea ecx,[esp+40h]
+		a.Call(WStrDtor);
+		a.Mark("out");
+		a.Raw(0x83, 0xC4, 0x60);                          // add esp,60h
+		a.Raw(0x61);                                      // popad
+		a.Raw(0xC2, 0x04, 0x00);                          // ret 4
+		a.Resolve();
+		return at;
+	}
+
+	// ---- resuming a campaign save with different players -----------------------------------------------
+	// A multiplayer save lists its players' Steam ids. FUN_10ef0d40 (save info; steam id*, is_host) returns the
+	// faction record (0Ch) of the player with that id, or an empty record: anyone not in the save had no
+	// faction. The engine's hidden "mp_campaign_all_resume_any_players" ([11B8B2AE]) skips that, but only for
+	// 2 players (host -> host slot, anyone else -> the other slot).
+	// Now: a player in the save keeps their faction; anyone else takes a faction whose player isn't in the
+	// session, in member-table order (the n-th newcomer gets the n-th free faction). Every machine has the same
+	// member table, so every machine computes the same factions. Not a member: empty record, as before.
+	// The three other checks of the hidden flag are switched on in place:
+	//   10EE0F20 (may I host/join this save) -> always; 10EE0BC0 (lobby browser: resumed lobby compatible)
+	//   -> always; FUN_1100c650 (saves listed for "Resume as Host") -> every save.
+	const uint SaveSlotOf = 0x10EF0D40;            // thiscall(save info; steam id*, bool is_host) ret 8
+	const uint SaveSlotCallSession = 0x10EF1DAF;   // edi = session, ecx = session+59730h
+	const uint SaveSlotCallFile = 0x10EF49F1;      // esi = session+8, ecx = save info read from a file
+	const uint EmptyRecordVa = 0x11B8B080;
+	const uint ResumeJoinCheckJump = 0x10EE0F2D;   // jne 10EE0F88 (75 59) -> jmp
+	const uint ResumeLobbyCompatCmov = 0x10EE0C41; // cmove eax,ecx (0F 44 C1) -> nops
+	const uint ResumeListCmov = 0x1100C6B5;        // cmovne ecx,edx (0F 45 CA) -> mov ecx,edx
+
+	static uint ssInSaveAt, ssMemberAt;   // helpers inside EmitSaveSlot, reused by the reserved-faction code
+
+	static uint EmitSaveSlot(Asm a, out uint fromFile, out uint core) {
+		// entries: ecx = save info, [esp+4] = steam id*, [esp+8] = is_host; core gets eax = session
+		uint at = a.Here;
+		a.Raw(0x8B, 0xC7);                                // mov eax,edi
+		a.J8(0xEB, "ss_core");
+		fromFile = a.Here;
+		a.Raw(0x8D, 0x46, 0xF8);                          // lea eax,[esi-8]
+		a.Mark("ss_core");
+		core = a.Here;
+		a.Raw(0x53, 0x55, 0x56, 0x57);                    // push ebx/ebp/esi/edi
+		a.Raw(0x83, 0xEC, 0x08);                          // sub esp,8           ([esp] = asking id)
+		a.Raw(0x8B, 0xF1);                                // mov esi,ecx         (save info)
+		a.Raw(0x8D, 0xA8, 0xF4, 0x8E, 0x05, 0x00);        // lea ebp,[eax+58EF4h] (member table)
+		a.Raw(0x8B, 0x54, 0x24, 0x1C);                    // mov edx,[esp+1Ch]   (steam id*)
+		a.Raw(0x8B, 0x02, 0x89, 0x04, 0x24);              // mov eax,[edx] / mov [esp],eax
+		a.Raw(0x8B, 0x42, 0x04, 0x89, 0x44, 0x24, 0x04);  // mov eax,[edx+4] / mov [esp+4],eax
+		// 1. in the save: that faction
+		a.Raw(0x8B, 0xD4);                                // mov edx,esp
+		a.J32("ss_insave", 0xE8);                         // call -> ecx = slot or -1
+		a.Raw(0x85, 0xC9); a.J32("ss_slot", 0x0F, 0x89);  // test ecx,ecx / jns
+		// 2. k = newcomers before the asker in the member table (the asker must be a member)
+		a.Raw(0x33, 0xFF, 0x33, 0xC9);                    // xor edi,edi / xor ecx,ecx
+		a.Mark("ss_b");
+		a.Raw(0x3B, 0x8D, 0xC0, 0x07, 0x00, 0x00);        // cmp ecx,[ebp+7C0h]
+		a.J32("ss_empty", 0x0F, 0x83);                    // jae: not a member
+		a.Raw(0x69, 0xD9, 0xF8, 0x00, 0x00, 0x00);        // imul ebx,ecx,0F8h
+		a.Raw(0x03, 0xDD);                                // add ebx,ebp
+		a.Raw(0xF6, 0x83, 0xF5, 0x00, 0x00, 0x00, 0x04);  // test byte ptr [ebx+0F5h],4   (slot in use)
+		a.J8(0x74, "ss_bnext");
+		a.Raw(0x8B, 0x03, 0x3B, 0x04, 0x24);              // mov eax,[ebx] / cmp eax,[esp]
+		a.J8(0x75, "ss_bother");
+		a.Raw(0x8B, 0x43, 0x04, 0x3B, 0x44, 0x24, 0x04);  // mov eax,[ebx+4] / cmp eax,[esp+4]
+		a.J8(0x74, "ss_c");
+		a.Mark("ss_bother");
+		a.Raw(0x51, 0x8B, 0xD3);                          // push ecx / mov edx,ebx
+		a.J32("ss_insave", 0xE8);
+		a.Raw(0x85, 0xC9, 0x59);                          // test ecx,ecx / pop ecx
+		a.J8(0x79, "ss_bnext");                           // jns: in the save, not a newcomer
+		a.Raw(0x47);                                      // inc edi
+		a.Mark("ss_bnext");
+		a.Raw(0x41); a.J8(0xEB, "ss_b");                  // inc ecx
+		// 3. the k-th faction whose player is not a member
+		a.Mark("ss_c");
+		a.Raw(0x33, 0xC9);                                // xor ecx,ecx
+		a.Mark("ss_cl");
+		a.Raw(0x0F, 0xB6, 0x06, 0x3B, 0xC8);              // movzx eax,byte ptr [esi] / cmp ecx,eax
+		a.J8(0x73, "ss_empty");                           // more newcomers than free factions
+		a.Raw(0x8B, 0x56, 0x0C, 0x8D, 0x14, 0xCA);        // mov edx,[esi+0Ch] / lea edx,[edx+ecx*8]
+		a.J32("ss_member", 0xE8);                         // al = member
+		a.Raw(0x84, 0xC0); a.J8(0x75, "ss_cnext");
+		a.Raw(0x85, 0xFF); a.J8(0x74, "ss_slot");         // test edi,edi / jz
+		a.Raw(0x4F);                                      // dec edi
+		a.Mark("ss_cnext");
+		a.Raw(0x41); a.J8(0xEB, "ss_cl");                 // inc ecx
+		a.Mark("ss_slot");
+		a.Raw(0x6B, 0xC1, 0x0C, 0x03, 0x46, 0x18);        // imul eax,ecx,0Ch / add eax,[esi+18h]
+		a.J8(0xEB, "ss_out");
+		a.Mark("ss_empty");
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint B = a.Here;
+		a.Raw(0x58, 0x05); Imm(a, EmptyRecordVa - B);     // pop eax / add eax, empty - B
+		a.Mark("ss_out");
+		a.Raw(0x83, 0xC4, 0x08, 0x5F, 0x5E, 0x5D, 0x5B);  // add esp,8 / pop edi/esi/ebp/ebx
+		a.Raw(0xC2, 0x08, 0x00);                          // ret 8
+
+		// ss_insave: esi = save info, edx = id* -> ecx = slot with that id, or -1 (keeps others but eax)
+		a.Mark("ss_insave");
+		ssInSaveAt = a.Here;
+		a.Raw(0x53, 0x33, 0xC9);                          // push ebx / xor ecx,ecx
+		a.Mark("ss_il");
+		a.Raw(0x0F, 0xB6, 0x06, 0x3B, 0xC8);              // movzx eax,byte ptr [esi] / cmp ecx,eax
+		a.J8(0x73, "ss_ino");
+		a.Raw(0x8B, 0x5E, 0x0C);                          // mov ebx,[esi+0Ch]
+		a.Raw(0x8B, 0x04, 0xCB, 0x3B, 0x02);              // mov eax,[ebx+ecx*8] / cmp eax,[edx]
+		a.J8(0x75, "ss_inext");
+		a.Raw(0x8B, 0x44, 0xCB, 0x04, 0x3B, 0x42, 0x04);  // mov eax,[ebx+ecx*8+4] / cmp eax,[edx+4]
+		a.J8(0x74, "ss_iret");
+		a.Mark("ss_inext");
+		a.Raw(0x41); a.J8(0xEB, "ss_il");
+		a.Mark("ss_ino");
+		a.Raw(0x83, 0xC9, 0xFF);                          // or ecx,-1
+		a.Mark("ss_iret");
+		a.Raw(0x5B, 0xC3);                                // pop ebx / ret
+
+		// ss_member: ebp = member table, edx = id* -> al = 1 if a member (slot in use) has that id
+		a.Mark("ss_member");
+		ssMemberAt = a.Here;
+		a.Raw(0x53, 0x51, 0x33, 0xC9);                    // push ebx / push ecx / xor ecx,ecx
+		a.Mark("ss_ml");
+		a.Raw(0x3B, 0x8D, 0xC0, 0x07, 0x00, 0x00);        // cmp ecx,[ebp+7C0h]
+		a.J8(0x73, "ss_mno");
+		a.Raw(0x69, 0xD9, 0xF8, 0x00, 0x00, 0x00, 0x03, 0xDD);   // imul ebx,ecx,0F8h / add ebx,ebp
+		a.Raw(0xF6, 0x83, 0xF5, 0x00, 0x00, 0x00, 0x04);  // test byte ptr [ebx+0F5h],4
+		a.J8(0x74, "ss_mnext");
+		a.Raw(0x8B, 0x03, 0x3B, 0x02);                    // mov eax,[ebx] / cmp eax,[edx]
+		a.J8(0x75, "ss_mnext");
+		a.Raw(0x8B, 0x43, 0x04, 0x3B, 0x42, 0x04);        // mov eax,[ebx+4] / cmp eax,[edx+4]
+		a.J8(0x74, "ss_myes");
+		a.Mark("ss_mnext");
+		a.Raw(0x41); a.J8(0xEB, "ss_ml");
+		a.Mark("ss_mno");
+		a.Raw(0x33, 0xC0); a.J8(0xEB, "ss_mret");         // xor eax,eax
+		a.Mark("ss_myes");
+		a.Raw(0xB0, 0x01);                                // mov al,1
+		a.Mark("ss_mret");
+		a.Raw(0x59, 0x5B, 0xC3);                          // pop ecx / pop ebx / ret
+		a.Resolve();
+		return at;
+	}
+
+	// ---- missing players: AI holds their faction until they come back ------------------------------------
+	// A faction of the resumed save is "reserved" when its player isn't in the session and no newcomer took it
+	// (the faction lookup gives newcomers the free factions in order, so the first N free ones are taken).
+	// - Save: the save's player list (FUN_10eebc70, session+8 vtable +60h) is built from the member table only.
+	//   Its count / entry calls now also return a stand-in member for each reserved faction (owner's Steam id,
+	//   faction key, slot bytes, empty name), so the next save still lists the absent player with their faction.
+	// - After loading (host, once per campaign, when the campaign map runs): every reserved faction that is
+	//   human is handed to the AI, and every faction that has a player but is AI-controlled (its player came back)
+	//   is handed back, with the engine's own synced command CCQ_FACTION_SWITCH_HUMAN_TO_AI (FUN_10f25180, the
+	//   path the game uses when a player drops out of a campaign; the command flips human <-> AI).
+	const uint MemberCountCall1 = 0x10EEBD77;      // call FUN_101f39d0 (ecx = member table): count
+	const uint MemberCountCall2 = 0x10EEC13A;
+	const uint MemberCount = 0x101F39D0;
+	const uint MemberEntryCall = 0x10EEBD87;       // call FUN_10f14e30 (ecx = member table; index) ret 4
+	const uint MemberEntry = 0x10F14E30;
+	const uint SwitchHumanAi = 0x10F25180;         // thiscall(session; faction key*) ret 4: host queues the command
+	const uint MpLobbyState = 0x10EF1B40;          // thiscall([session+596F0h]) -> 3 in a running game
+	const uint FactionKey = 0x105ECEF0;            // thiscall(faction) -> key*
+	const uint WStrEquals = 0x100EE2C0;            // thiscall(wstring*; wstring*) ret 4 -> al
+	const uint CampaignUiVa = 0x11BC8FE0;          // [[[+0]+0A98h]+8] = campaign model, [model+1498h] = factions
+	const uint ReconcileEnvVa = 0x11CB1800;        // campaign env already handled
+	const uint ReconcileWaitVa = 0x11CB1804;       // frames since the campaign map came up
+	const uint PhantomVa = 0x11CB1810;             // 100h: stand-in member entry
+	const int ReconcileWaitFrames = 120;
+	static uint reservedTestAt;
+
+	// esi = save info, ebp = member table, ecx = slot -> al = 1 if reserved; keeps ebx, ecx, esi, edi, ebp
+	static uint EmitReservedTest(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x53, 0x57, 0x51);                          // push ebx / push edi / push ecx     ([esp] = slot)
+		a.Raw(0x8B, 0x56, 0x0C, 0x8D, 0x14, 0xCA);        // mov edx,[esi+0Ch] / lea edx,[edx+ecx*8]
+		a.Call(ssMemberAt);
+		a.Raw(0x84, 0xC0); a.J8(0x75, "rt_no");           // its player is here
+		a.Raw(0x33, 0xFF, 0x33, 0xDB);                    // xor edi,edi (newcomers) / xor ebx,ebx
+		a.Mark("rt_nl");
+		a.Raw(0x3B, 0x9D, 0xC0, 0x07, 0x00, 0x00);        // cmp ebx,[ebp+7C0h]
+		a.J8(0x73, "rt_ndone");
+		a.Raw(0x69, 0xD3, 0xF8, 0x00, 0x00, 0x00, 0x03, 0xD5);   // imul edx,ebx,0F8h / add edx,ebp
+		a.Raw(0xF6, 0x82, 0xF5, 0x00, 0x00, 0x00, 0x04);  // test byte ptr [edx+0F5h],4
+		a.J8(0x74, "rt_nnext");
+		a.Call(ssInSaveAt);                               // ecx = slot or -1
+		a.Raw(0x85, 0xC9); a.J8(0x79, "rt_nnext");
+		a.Raw(0x47);                                      // inc edi
+		a.Mark("rt_nnext");
+		a.Raw(0x43); a.J8(0xEB, "rt_nl");                 // inc ebx
+		a.Mark("rt_ndone");
+		a.Raw(0x33, 0xDB);                                // xor ebx,ebx
+		a.Mark("rt_rl");
+		a.Raw(0x3B, 0x1C, 0x24); a.J8(0x73, "rt_rdone");  // cmp ebx,[esp] / jae
+		a.Raw(0x8B, 0x56, 0x0C, 0x8D, 0x14, 0xDA);        // mov edx,[esi+0Ch] / lea edx,[edx+ebx*8]
+		a.Call(ssMemberAt);
+		a.Raw(0x84, 0xC0); a.J8(0x75, "rt_rnext");
+		a.Raw(0x4F);                                      // dec edi    (a free faction before this one)
+		a.Mark("rt_rnext");
+		a.Raw(0x43); a.J8(0xEB, "rt_rl");
+		a.Mark("rt_rdone");
+		a.Raw(0x85, 0xFF); a.J8(0x7F, "rt_no");           // test edi,edi / jg: a newcomer gets this one
+		a.Raw(0xB0, 0x01); a.J8(0xEB, "rt_out");
+		a.Mark("rt_no");
+		a.Raw(0x33, 0xC0);
+		a.Mark("rt_out");
+		a.Raw(0x59, 0x5F, 0x5B, 0xC3);                    // pop ecx / pop edi / pop ebx / ret
+		a.Resolve();
+		return at;
+	}
+
+	// replaces the count call: ecx = member table -> members + reserved factions
+	static uint EmitMemberCountPlus(Asm a, uint reserved) {
+		uint at = a.Here;
+		a.Raw(0x56, 0x55, 0x57, 0x51);                    // push esi/ebp/edi/ecx
+		a.Raw(0x8B, 0xE9, 0x8D, 0xB1, 0x3C, 0x08, 0x00, 0x00);   // mov ebp,ecx / lea esi,[ecx+83Ch]  (session+59730h)
+		a.Raw(0x33, 0xFF, 0x33, 0xC9);                    // xor edi,edi / xor ecx,ecx
+		a.Mark("mc_l");
+		a.Raw(0x0F, 0xB6, 0x06, 0x3B, 0xC8); a.J8(0x73, "mc_d");   // movzx eax,byte [esi] / cmp ecx,eax
+		a.Call(reserved);
+		a.Raw(0x84, 0xC0); a.J8(0x74, "mc_n");
+		a.Raw(0x47);                                      // inc edi
+		a.Mark("mc_n");
+		a.Raw(0x41); a.J8(0xEB, "mc_l");
+		a.Mark("mc_d");
+		a.Raw(0x8B, 0x85, 0xC0, 0x07, 0x00, 0x00, 0x03, 0xC7);   // mov eax,[ebp+7C0h] / add eax,edi
+		a.Raw(0x59, 0x5F, 0x5D, 0x5E, 0xC3);              // pop ecx/edi/ebp/esi / ret
+		a.Resolve();
+		return at;
+	}
+
+	// replaces the entry call: thiscall(member table; index) ret 4; past the members -> stand-in for the
+	// (index - members)-th reserved faction
+	static uint EmitMemberEntryPlus(Asm a, uint reserved) {
+		uint at = a.Here;
+		a.Raw(0x8B, 0x44, 0x24, 0x04, 0x3B, 0x81, 0xC0, 0x07, 0x00, 0x00);   // mov eax,[esp+4] / cmp eax,[ecx+7C0h]
+		a.J8(0x73, "me_ph");
+		a.Jmp(MemberEntry);                               // a real member: the original
+		a.Mark("me_ph");
+		a.Raw(0x56, 0x55, 0x57, 0x53);                    // push esi/ebp/edi/ebx
+		a.Raw(0x8B, 0xE9, 0x8D, 0xB1, 0x3C, 0x08, 0x00, 0x00);   // mov ebp,ecx / lea esi,[ecx+83Ch]
+		a.Raw(0x2B, 0x81, 0xC0, 0x07, 0x00, 0x00, 0x8B, 0xF8);   // sub eax,[ecx+7C0h] / mov edi,eax
+		a.Raw(0x33, 0xC9);
+		a.Mark("me_l");
+		a.Raw(0x0F, 0xB6, 0x06, 0x3B, 0xC8); a.J8(0x73, "me_none");
+		a.Call(reserved);
+		a.Raw(0x84, 0xC0); a.J8(0x74, "me_n");
+		a.Raw(0x85, 0xFF); a.J8(0x74, "me_build");
+		a.Raw(0x4F);
+		a.Mark("me_n");
+		a.Raw(0x41); a.J8(0xEB, "me_l");
+		a.Mark("me_none");
+		a.Raw(0x33, 0xC0); a.J32("me_out", 0xE9);
+		a.Mark("me_build");                               // ecx = slot
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint B = a.Here;
+		a.Raw(0x5B, 0x81, 0xC3); Imm(a, PhantomVa - B);   // pop ebx / add ebx, stand-in - B
+		a.Raw(0x8B, 0x56, 0x0C);                          // mov edx,[esi+0Ch]
+		a.Raw(0x8B, 0x04, 0xCA, 0x89, 0x03);              // mov eax,[edx+ecx*8] / mov [ebx],eax       (Steam id)
+		a.Raw(0x8B, 0x44, 0xCA, 0x04, 0x89, 0x43, 0x04);  // mov eax,[edx+ecx*8+4] / mov [ebx+4],eax
+		a.Raw(0x6B, 0xC1, 0x0C, 0x03, 0x46, 0x18);        // imul eax,ecx,0Ch / add eax,[esi+18h]       (faction key)
+		a.Raw(0x8B, 0x10, 0x89, 0x93, 0xA4, 0x00, 0x00, 0x00);   // [ebx+0A4h..0AFh] = key (read-only view)
+		a.Raw(0x8B, 0x50, 0x04, 0x89, 0x93, 0xA8, 0x00, 0x00, 0x00);
+		a.Raw(0x8B, 0x50, 0x08, 0x89, 0x93, 0xAC, 0x00, 0x00, 0x00);
+		a.Raw(0x33, 0xD2);                                // name: empty string at +0D4h
+		a.Raw(0x89, 0x93, 0xD4, 0x00, 0x00, 0x00, 0x89, 0x93, 0xD8, 0x00, 0x00, 0x00, 0x89, 0x9B, 0xDC, 0x00, 0x00, 0x00);
+		a.Raw(0xC6, 0x83, 0xF5, 0x00, 0x00, 0x00, 0x04);  // mov byte ptr [ebx+0F5h],4   (in use)
+		a.Raw(0x33, 0xC0);                                // slot bytes -> [+0F6h] = b24 & 7 | (b30 & 7) << 3
+		a.Raw(0x8B, 0x56, 0x24, 0x85, 0xD2); a.J8(0x74, "me_b30");
+		a.Raw(0x0F, 0xB6, 0x04, 0x0A, 0x83, 0xE0, 0x07);  // movzx eax,byte ptr [edx+ecx] / and eax,7
+		a.Mark("me_b30");
+		a.Raw(0x8B, 0x56, 0x30, 0x85, 0xD2); a.J8(0x74, "me_bset");
+		a.Raw(0x0F, 0xB6, 0x14, 0x0A, 0x83, 0xE2, 0x07, 0xC1, 0xE2, 0x03, 0x0B, 0xC2);   // movzx edx,.. / and / shl 3 / or
+		a.Mark("me_bset");
+		a.Raw(0x88, 0x83, 0xF6, 0x00, 0x00, 0x00);        // mov [ebx+0F6h],al
+		a.Raw(0x8B, 0xC3);                                // mov eax,ebx
+		a.Mark("me_out");
+		a.Raw(0x5B, 0x5F, 0x5D, 0x5E, 0xC2, 0x04, 0x00);  // pop ebx/edi/ebp/esi / ret 4
+		a.Resolve();
+		return at;
+	}
+
+	// every frame (frame hook pushad block, [ebp+58h] = session): once per campaign, after the map has run for
+	// a moment, the host hands reserved factions to the AI and gives returning players their faction back
+	static void EmitReserveReconcile(Asm a, uint reserved) {
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint B = a.Here;
+		a.Raw(0x5B);                                      // pop ebx
+		a.Raw(0x8B, 0x7D, 0x58, 0x85, 0xFF); a.J32("rc_done", 0x0F, 0x84);   // mov edi,[ebp+58h] (session)
+		a.Raw(0x8B, 0x87, 0xD8, 0x96, 0x05, 0x00);        // mov eax,[edi+596D8h]   (campaign env)
+		a.Raw(0x85, 0xC0); a.J8(0x75, "rc_have");
+		a.Raw(0x89, 0x83); Imm(a, ReconcileEnvVa - B);    // mov [env],eax (0)
+		a.Raw(0x89, 0x83); Imm(a, ReconcileWaitVa - B);   // mov [wait],eax (0)
+		a.J32("rc_done", 0xE9);
+		a.Mark("rc_have");
+		a.Raw(0x3B, 0x83); Imm(a, ReconcileEnvVa - B); a.J32("rc_done", 0x0F, 0x84);   // handled already
+		a.Raw(0x83, 0xBF, 0xD0, 0x96, 0x05, 0x00, 0x00); a.J32("rc_done", 0x0F, 0x85); // in a battle
+		a.Raw(0x8B, 0x8F, 0xF0, 0x96, 0x05, 0x00, 0x85, 0xC9); a.J32("rc_done", 0x0F, 0x84);
+		a.Call(MpLobbyState);
+		a.Raw(0x83, 0xF8, 0x03); a.J32("rc_done", 0x0F, 0x85);   // game running
+		a.Raw(0x8B, 0x83); Imm(a, CampaignUiVa - B);      // mov eax,[campaign UI]
+		a.Raw(0x85, 0xC0); a.J32("rc_done", 0x0F, 0x84);
+		a.Raw(0x8B, 0x80, 0x98, 0x0A, 0x00, 0x00, 0x85, 0xC0); a.J32("rc_done", 0x0F, 0x84);
+		a.Raw(0x83, 0x78, 0x70, 0x00); a.J32("rc_done", 0x0F, 0x84);   // campaign map up
+		a.Raw(0x8B, 0x40, 0x08, 0x85, 0xC0); a.J32("rc_done", 0x0F, 0x84);
+		a.Raw(0x8B, 0x80, 0x98, 0x14, 0x00, 0x00, 0x85, 0xC0); a.J32("rc_done", 0x0F, 0x84);   // factions
+		a.Raw(0x8B, 0xF0);                                // mov esi,eax  (factions, for now)
+		a.Raw(0xFF, 0x83); Imm(a, ReconcileWaitVa - B);   // inc dword [wait]
+		a.Raw(0x81, 0xBB); Imm(a, ReconcileWaitVa - B); Imm(a, (uint)ReconcileWaitFrames);
+		a.J32("rc_done", 0x0F, 0x82);                     // jb: give the map a moment
+		a.Raw(0x8B, 0x87, 0xD8, 0x96, 0x05, 0x00);        // mov eax,[edi+596D8h]
+		a.Raw(0x89, 0x83); Imm(a, ReconcileEnvVa - B);    // handled (whatever happens next)
+		a.Raw(0x56);                                      // push esi                ([esp] = factions)
+		a.Raw(0x8B, 0xCF); a.Call(SessionIsHost);
+		a.Raw(0x84, 0xC0); a.J32("rc_pop1", 0x0F, 0x84);  // only the host sends commands
+		a.Raw(0x8D, 0xB7, 0x30, 0x97, 0x05, 0x00);        // lea esi,[edi+59730h]  (save info)
+		a.Raw(0x8D, 0xAF, 0xF4, 0x8E, 0x05, 0x00);        // lea ebp,[edi+58EF4h]  (member table)
+		a.Raw(0x33, 0xC9);                                // slot 0
+		a.Mark("rc_sl");
+		a.Raw(0x0F, 0xB6, 0x06, 0x3B, 0xC8); a.J32("rc_pop1", 0x0F, 0x83);
+		a.Raw(0x51);                                      // push ecx                ([esp] = slot, [esp+4] = factions)
+		a.Call(reserved);
+		a.Raw(0x0F, 0xB6, 0xC0, 0x50);                    // movzx eax,al / push eax ([esp] = want AI)
+		a.Raw(0x6B, 0xC1, 0x0C, 0x03, 0x46, 0x18, 0x50);  // imul eax,ecx,0Ch / add eax,[esi+18h] / push eax  ([esp] = key)
+		a.Raw(0x33, 0xDB);                                // faction index
+		a.Mark("rc_fl");
+		a.Raw(0x8B, 0x54, 0x24, 0x0C);                    // mov edx,[esp+0Ch]      (factions)
+		a.Raw(0x3B, 0x5A, 0x40); a.J8(0x73, "rc_next");   // cmp ebx,[edx+40h]: not found
+		a.Raw(0x8B, 0x42, 0x44, 0x8B, 0x0C, 0x98);        // mov eax,[edx+44h] / mov ecx,[eax+ebx*4]
+		a.Raw(0x51);                                      // push ecx                (faction)
+		a.Call(FactionKey);                               // eax = its key
+		a.Raw(0xFF, 0x74, 0x24, 0x04, 0x8B, 0xC8);        // push [esp+4] (our key) / mov ecx,eax
+		a.Call(WStrEquals);
+		a.Raw(0x59);                                      // pop ecx                 (faction)
+		a.Raw(0x84, 0xC0); a.J8(0x75, "rc_found");
+		a.Raw(0x43); a.J8(0xEB, "rc_fl");
+		a.Mark("rc_found");
+		a.Raw(0x33, 0xD2, 0x80, 0xB9, 0xA0, 0x06, 0x00, 0x00, 0x00, 0x0F, 0x94, 0xC2);   // xor edx,edx / cmp byte [ecx+6A0h],0 / sete dl (AI now)
+		a.Raw(0x3B, 0x54, 0x24, 0x04); a.J8(0x74, "rc_next");     // already as wanted
+		a.Raw(0xFF, 0x34, 0x24, 0x8B, 0xCF);              // push [esp] (key) / mov ecx,edi
+		a.Call(SwitchHumanAi);
+		a.Mark("rc_next");
+		a.Raw(0x83, 0xC4, 0x08, 0x59, 0x41);              // add esp,8 / pop ecx / inc ecx
+		a.J32("rc_sl", 0xE9);
+		a.Mark("rc_pop1");
+		a.Raw(0x83, 0xC4, 0x04);                          // drop factions
+		a.Mark("rc_done");
+		a.Raw(0x61);                                      // popad
+		a.Resolve();
+	}
+
+	// ---- default save name with 3+ players ---------------------------------------------------------------
+	// FUN_106a3a30 names a multiplayer save "Host (Clan) vs. Other (Clan): date" (or the co-op form) from the
+	// save's player list, which only ever shows two players. With 3+ players the name is now
+	// "Ann, Bob, Cat, Dan: date" (absent players' stand-ins have no name and are left out; long lists end in "...").
+	// Hook: the final assign (call FUN_100edbe0, ecx = output, [esp+4] = name); the player list is the local
+	// header at [esp+5Ch] (count [+30h], names data [+3Ch]) and the date string is at [esp+50h].
+	const uint SaveNameAssignCall = 0x106A3DFD;
+	const uint WStrAssign = 0x100EDBE0;            // thiscall(wstring*; const wstring*) ret 4
+
+	static uint EmitSaveName(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x80, 0xBC, 0x24, 0x8C, 0x00, 0x00, 0x00, 0x02);   // cmp byte ptr [esp+8Ch],2
+		a.J8(0x77, "sn_build");
+		a.Jmp(WStrAssign);                                // 1-2 players: the game's own name
+		a.Mark("sn_build");
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0x81, 0xEC, 0x20, 0x02, 0x00, 0x00);        // sub esp,220h  ([esp] text, [esp+200h] wstring)
+		a.Raw(0x0F, 0xB6, 0xAC, 0x24, 0xCC, 0x02, 0x00, 0x00);   // movzx ebp,byte ptr [esp+2CCh]  (players)
+		a.Raw(0x8B, 0xB4, 0x24, 0xD8, 0x02, 0x00, 0x00);  // mov esi,[esp+2D8h]   (names)
+		a.Raw(0x8B, 0xFC, 0x33, 0xDB);                    // mov edi,esp / xor ebx,ebx
+		a.Mark("sn_nl");
+		a.Raw(0x3B, 0xDD); a.J8(0x73, "sn_nd");           // cmp ebx,ebp / jae
+		a.Raw(0x6B, 0xC3, 0x0C, 0x03, 0xC6);              // imul eax,ebx,0Ch / add eax,esi
+		a.Raw(0x8B, 0x08, 0x85, 0xC9); a.J8(0x74, "sn_nn");   // mov ecx,[eax] / test: no name
+		a.Raw(0x8B, 0x50, 0x08);                          // mov edx,[eax+8]
+		a.Raw(0x8B, 0xC7, 0x2B, 0xC4);                    // mov eax,edi / sub eax,esp  (bytes so far)
+		a.Raw(0x3D, 0x2C, 0x01, 0x00, 0x00); a.J8(0x72, "sn_room");   // cmp eax,300 (150 chars)
+		a.Raw(0xC7, 0x07, 0x2E, 0x00, 0x2E, 0x00, 0x66, 0xC7, 0x47, 0x04, 0x2E, 0x00);   // "..."
+		a.Raw(0x83, 0xC7, 0x06); a.J8(0xEB, "sn_nd");
+		a.Mark("sn_room");
+		a.Raw(0x85, 0xC0); a.J8(0x74, "sn_first");
+		a.Raw(0xC7, 0x07, 0x2C, 0x00, 0x20, 0x00, 0x83, 0xC7, 0x04);   // ", "
+		a.Mark("sn_first");
+		a.Raw(0x83, 0xF9, 0x28); a.J8(0x76, "sn_c1");     // at most 40 chars of a name
+		a.Raw(0xB9, 0x28, 0x00, 0x00, 0x00);
+		a.Mark("sn_c1");
+		a.Raw(0x56, 0x8B, 0xF2, 0xF3, 0x66, 0xA5, 0x5E);  // push esi / mov esi,edx / rep movsw / pop esi
+		a.Mark("sn_nn");
+		a.Raw(0x43); a.J8(0xEB, "sn_nl");                 // inc ebx
+		a.Mark("sn_nd");
+		a.Raw(0xC7, 0x07, 0x3A, 0x00, 0x20, 0x00, 0x83, 0xC7, 0x04);   // ": "
+		a.Raw(0x8D, 0x84, 0x24, 0x90, 0x02, 0x00, 0x00);  // lea eax,[esp+290h]   (date)
+		a.Raw(0x8B, 0x08, 0x8B, 0x70, 0x08);              // mov ecx,[eax] / mov esi,[eax+8]
+		a.Raw(0x83, 0xF9, 0x28); a.J8(0x76, "sn_c2");
+		a.Raw(0xB9, 0x28, 0x00, 0x00, 0x00);
+		a.Mark("sn_c2");
+		a.Raw(0xF3, 0x66, 0xA5);                          // rep movsw
+		a.Raw(0x8B, 0xCF, 0x2B, 0xCC, 0xD1, 0xE9);        // mov ecx,edi / sub ecx,esp / shr ecx,1  (length)
+		a.Raw(0x51, 0x8D, 0x44, 0x24, 0x04, 0x50);        // push ecx / lea eax,[esp+4] / push eax
+		a.Raw(0x8D, 0x8C, 0x24, 0x08, 0x02, 0x00, 0x00);  // lea ecx,[esp+208h]
+		a.Call(WStrFromRange);
+		a.Raw(0x8D, 0x84, 0x24, 0x00, 0x02, 0x00, 0x00, 0x50);   // lea eax,[esp+200h] / push eax
+		a.Raw(0x8B, 0x8C, 0x24, 0x3C, 0x02, 0x00, 0x00);  // mov ecx,[esp+23Ch]   (output: pushad's ecx)
+		a.Call(WStrAssign);
+		a.Raw(0x8D, 0x8C, 0x24, 0x00, 0x02, 0x00, 0x00);
+		a.Call(WStrDtor);
+		a.Raw(0x81, 0xC4, 0x20, 0x02, 0x00, 0x00, 0x61, 0xC2, 0x04, 0x00);   // add esp,220h / popad / ret 4
+		a.Resolve();
+		return at;
+	}
+
+	// The resume lobby (FUN_10f2c830, edi = session, ebp = member) also gives a joining player two per-slot
+	// bytes of the save by Steam id: FUN_10ef0b30 ([info+24h][slot]) and FUN_10ef0ae0 ([info+30h][slot]); not in
+	// the save -> 0. Both now use the slot the faction lookup above assigns, so a newcomer gets the values of
+	// the faction they take over.
+	const uint SaveByte24Call = 0x10F2C8AC;        // call FUN_10ef0b30: thiscall(info; steam id*) ret 4
+	const uint SaveByte30Call = 0x10F2C8BE;        // call FUN_10ef0ae0
+	const uint SaveByte24 = 0x10EF0B30;
+	const uint SaveByte30 = 0x10EF0AE0;
+
+	static uint EmitSaveSlotByte(Asm a, uint core, out uint at30) {
+		uint at24 = a.Here;
+		a.Raw(0xBA, 0x24, 0x00, 0x00, 0x00);              // mov edx,24h
+		a.J8(0xEB, "sb_core");
+		at30 = a.Here;
+		a.Raw(0xBA, 0x30, 0x00, 0x00, 0x00);              // mov edx,30h
+		a.Mark("sb_core");
+		a.Raw(0x56, 0x53);                                // push esi / push ebx
+		a.Raw(0x8B, 0xDA, 0x8B, 0xF1);                    // mov ebx,edx / mov esi,ecx
+		a.Raw(0x6A, 0x00);                                // push 0                 (is_host)
+		a.Raw(0xFF, 0x74, 0x24, 0x10);                    // push [esp+10h]         (steam id*)
+		a.Raw(0x8B, 0xC7);                                // mov eax,edi            (session)
+		a.Call(core);                                     // eax = faction record (ecx = info)
+		a.Raw(0x2B, 0x46, 0x18);                          // sub eax,[esi+18h]
+		a.Raw(0x0F, 0xB6, 0x0E, 0x6B, 0xC9, 0x0C);        // movzx ecx,byte ptr [esi] / imul ecx,ecx,0Ch
+		a.Raw(0x3B, 0xC1); a.J8(0x73, "sb_zero");         // cmp eax,ecx / jae: no faction
+		a.Raw(0x33, 0xD2, 0xB9, 0x0C, 0x00, 0x00, 0x00);  // xor edx,edx / mov ecx,0Ch
+		a.Raw(0xF7, 0xF1);                                // div ecx                (slot)
+		a.Raw(0x8B, 0x0C, 0x1E);                          // mov ecx,[esi+ebx]
+		a.Raw(0x0F, 0xB6, 0x04, 0x01);                    // movzx eax,byte ptr [ecx+eax]
+		a.J8(0xEB, "sb_done");
+		a.Mark("sb_zero");
+		a.Raw(0x33, 0xC0);                                // xor eax,eax
+		a.Mark("sb_done");
+		a.Raw(0x5B, 0x5E, 0xC2, 0x04, 0x00);              // pop ebx / pop esi / ret 4
+		a.Resolve();
+		return at24;
 	}
 
 	// ---- gifted units with several watchers -------------------------------------------------------------
@@ -733,6 +1316,7 @@ public static class EightPlayerPatcher {
 		EmitCrashFilterInstall(a);
 		EmitResyncKeyPoll(a);
 		EmitPendingResync(a);
+		EmitReserveReconcile(a, reservedTestAt);
 		EmitPinFloatModes(a);
 		a.Jmp(MultiplayerUpdate);
 		return at;
@@ -1481,6 +2065,19 @@ public static class EightPlayerPatcher {
 		PutJmp(InviteWireAt, inviteAt, 7);
 		ExpectBytes(SaveScreenLocaleCategory, 0x6A, 0x00, 0xE8);
 		b[VaToOff(SaveScreenLocaleCategory) + 1] = 5;
+		uint slotFromFile, slotCore, byte30At;
+		uint slotAt = EmitSaveSlot(s, out slotFromFile, out slotCore);
+		RedirectCall(SaveSlotCallSession, SaveSlotOf, slotAt);
+		RedirectCall(SaveSlotCallFile, SaveSlotOf, slotFromFile);
+		uint byte24At = EmitSaveSlotByte(s, slotCore, out byte30At);
+		RedirectCall(SaveByte24Call, SaveByte24, byte24At);
+		RedirectCall(SaveByte30Call, SaveByte30, byte30At);
+		reservedTestAt = EmitReservedTest(s);
+		uint countPlusAt = EmitMemberCountPlus(s, reservedTestAt);
+		RedirectCall(MemberCountCall1, MemberCount, countPlusAt);
+		RedirectCall(MemberCountCall2, MemberCount, countPlusAt);
+		uint entryPlusAt = EmitMemberEntryPlus(s, reservedTestAt);
+		RedirectCall(MemberEntryCall, MemberEntry, entryPlusAt);
 		uint framePinAt = EmitFramePin(s);
 		RedirectCall(FrameUpdateCall, MultiplayerUpdate, framePinAt);
 		uint tickPinAt = EmitBattleTickPin(s);
@@ -1512,6 +2109,23 @@ public static class EightPlayerPatcher {
 		ReserveDataDword(CrashInstalledVa);
 		ReserveDataDword(ResyncPendingVa);
 		ReserveDataDword(StandInSideVa); ReserveDataDword(StandInSideVa + 4);
+		uint lobbyRecordAt = EmitLobbyCountRecord(s);
+		ExpectBytes(LobbyRecordAt, 0x83, 0xBB, 0x88, 0x00, 0x00, 0x00, 0x01);
+		PutJmp(LobbyRecordAt, lobbyRecordAt, 7);
+		ExpectBytes(ResumeJoinCheckJump, 0x75, 0x59);
+		b[VaToOff(ResumeJoinCheckJump)] = 0xEB;
+		ExpectBytes(ResumeLobbyCompatCmov, 0x0F, 0x44, 0xC1);
+		for (int i = 0; i < 3; i++) b[VaToOff(ResumeLobbyCompatCmov) + i] = 0x90;
+		ExpectBytes(ResumeListCmov, 0x0F, 0x45, 0xCA);
+		b[VaToOff(ResumeListCmov)] = 0x8B; b[VaToOff(ResumeListCmov) + 1] = 0xCA; b[VaToOff(ResumeListCmov) + 2] = 0x90;
+		uint statusAt = EmitStatusCount(s);
+		RedirectCall(StatusStateCall, SetState, statusAt);
+		ReserveDataDword(LobbyCursorVa);
+		ReserveDataDword(LobbyTableVa + LobbySlots * 16 - 4);   // the whole table (zero-filled)
+		uint saveNameAt = EmitSaveName(s);
+		RedirectCall(SaveNameAssignCall, WStrAssign, saveNameAt);
+		ReserveDataDword(ReconcileEnvVa); ReserveDataDword(ReconcileWaitVa);
+		ReserveDataDword(PhantomVa + 0xFC);                     // the stand-in member entry
 		AddSection(".s2mp", s.Bytes);
 
 		File.WriteAllBytes(outPath, b);
