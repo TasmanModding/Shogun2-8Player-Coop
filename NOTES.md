@@ -91,6 +91,13 @@ calls/jumps, and no relocation covers a patched byte (`verify_load.ps1` checks u
   host saves "resync" (106f8bc0), reads the file and sends it (10edbb20, 200000-byte chunks) -> 7 -> 10; client 6 -> 8 (received) -> loads (10bd5c60) -> 9 -> 0Bh.
 - Message 0xAC (FUN_10f27820(session; value), broadcast incl. self) -> 10F10E2D FUN_10efa140(resync; session, sender==self, value):
   ignored unless state 1..3; value 0 = decline -> disconnect. FUN_10f2d4b0 only sends in state 1 or 3.
+- Built for 2 players (v1.12 fix): FUN_10efa140 goes to 4 ("both") after ONE remote accept, so with 3+ players the host saved
+  and sent after the first client accepted; PCs not ready (loading, or FUN_10f058d0 refused: lobby state != 3 or flag 0xC)
+  missed the file and kept the old campaign. Any PC left in state != 0 blocked every later resync and the host key.
+  Mod (answer stub at 10F10E2D): counts remote value-1 accepts ([11CB1808], reset by the frame hook while idle); the host
+  holds state 4 back as 2 until accepts >= FUN_10f0eb00 - 1; frame hook sends anyway after 2400 frames ([11CB180C]).
+  Value 3 = host reset (the key): state 4+ -> FUN_10f25890 (engine reset: state 0, free buffer) + restart; state 2 ->
+  accept sent again. Value 2 (pending start) never aborts. Can't start yet -> resync pending (frame hook retries).
 
 ### Desync causes found in the engine
 - **Locale leak** (fixed): FUN_110b83f0 (save list 10FAE6D0, load list 10FC7E90, save dialog 111C1370, 11076E6E) does

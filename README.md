@@ -21,8 +21,8 @@ Builds on the 4-player campaign mod. Installing this one removes the 4-player mo
 | **Gift units to spectators** | Each press of the gift button sends the selected units to the **next spectator in turn** (in join order); only that player can command them, and they can hand units back. (The original game only handled one spectator: units went to the first, everyone could command them, or they were lost.) |
 | **Desync: save screen bug** | Opening the Save or Load screen switched that PC's maths and text rules to its Windows language for the rest of the session (e.g. decimal comma on German, Czech, French or Russian Windows), so it no longer matched the other players. This is why "only the host should save" helped. Fixed: those screens now only change how dates are shown. |
 | **Desync: floating-point drift** | The game never locked the CPU's floating-point settings, so anything that changed them on one PC (overlays, anti-virus, drivers, alt-tabbing) made that PC calculate slightly differently. Fixed: the settings are reset to the game's defaults every frame and every battle tick. |
-| **Desync recovery** | If a campaign goes out of sync, nobody is dropped: the resync starts by itself (as soon as everyone is back on the campaign map, e.g. after a battle) and every player joins it. |
-| **Host resync key: Ctrl+Shift+F9** | If the campaign looks wrong or is stuck (one PC stuck on an AI's turn while another shows a player's turn, armies in different places), the **host** presses **Ctrl+Shift+F9** on the campaign map. Everyone gets the host's copy of the campaign, the same way a detected desync is fixed. Wait for the resync popup to finish. It does nothing in battles or the menus, and nothing if a client presses it. |
+| **Desync recovery** | If a campaign goes out of sync, nobody is dropped: the resync starts by itself (as soon as everyone is back on the campaign map, e.g. after a battle) and every player joins it. The host waits until **every** player is ready before sending its copy of the campaign (the original game only waited for one other player). |
+| **Host resync key: Ctrl+Shift+F9** | If the campaign looks wrong or is stuck (one PC stuck on an AI's turn while another shows a player's turn, armies in different places), the **host** presses **Ctrl+Shift+F9** on the campaign map. Everyone gets the host's copy of the campaign, the same way a detected desync is fixed. Wait for the resync popup to finish. If a resync got stuck, the key cancels it on every PC and starts a fresh one. It does nothing in battles or the menus, and nothing if a client presses it. |
 | **Crash reports** | If the game crashes during a multiplayer game, it writes `eightplayer_crash.txt` (a few KB) and `eightplayer_crash.dmp` (a small dump, well under 1 MB) in the game folder, instead of Steam's 1–2 GB dump. If it closes itself instead, the reason is in `eightplayer_errors.txt`. Send these with your bug report. |
 | **Battle desync: no more kick** | A battle can't be resynced, so the game used to drop the out-of-sync player. Now the battle carries on for everyone. The out-of-sync player's view may drift (a unit alive on their screen that is dead for others). Back on the campaign map, the host's state is copied to everyone by the campaign resync. |
 
@@ -45,7 +45,7 @@ Everyone must also end up with the same two hashes, or they can't join each othe
 
 | File | SHA-256 |
 |---|---|
-| `empire.retail.dll` | `971C7A955B045433F54161126A6866B3F37541A90CB23B2F3C88DB9A8ECD2280` |
+| `empire.retail.dll` | `E6722B2088594A31938C50B41848ED1241BBC60C5B0F020D30D7B7B5B0F0E650` |
 | `data\eightplayer_coop.pack` | `983F63E02958AF253B911934680AEE736CED160B2BB9FC152023EBCF479853F5` |
 
 ## Before you play
@@ -86,6 +86,12 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 18. Resume a save with one player missing: a few seconds after the map appears, their clan is AI-controlled. Play a turn and save.
 19. Rehost that save with the missing player back: they get their own clan back and control it again.
 20. Save a 3+ player game: the save is named after every player.
+
+## v1.12: resync fixed for 3+ players
+- **Resync reaches everyone.** The game's resync was built for 2 players: the host sent its copy of the campaign as soon as *one* other player was ready. With 3+ players, anyone not ready yet missed it and stayed on the old campaign, so turns got stuck for good. Now the host waits until every player is ready (or about a minute, if one PC never answers).
+- **Ctrl+Shift+F9 always works.** A half-finished resync on any PC used to block every later one, the host's key included. Now the key cancels a stuck resync on every PC and starts a fresh one.
+
+**Already stuck on v1.11?** Everyone quits, the host resumes the newest save (Resume as Host) and everyone rejoins. Then update to v1.12.
 
 ## v1.11: please test and report
 **New in v1.11:**

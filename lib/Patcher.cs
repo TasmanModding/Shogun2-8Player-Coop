@@ -465,7 +465,7 @@ public static class EightPlayerPatcher {
 	const uint GetCurrentThreadIdIat = 0x115A11F4;
 	const uint CrashPrevFilterVa = 0x11CB1538;   // previous filter (third reserved .data dword)
 	const uint CrashInstalledVa = 0x11CB153C;    // filter installed (fourth)
-	public const string Version = "1.11";
+	public const string Version = "1.12";
 	static uint crashFilterAt;
 
 	// ---- engine error log ------------------------------------------------------------------------------
@@ -1316,6 +1316,7 @@ public static class EightPlayerPatcher {
 		EmitCrashFilterInstall(a);
 		EmitResyncKeyPoll(a);
 		EmitPendingResync(a);
+		EmitResyncWait(a);
 		EmitReserveReconcile(a, reservedTestAt);
 		EmitPinFloatModes(a);
 		a.Jmp(MultiplayerUpdate);
@@ -1546,21 +1547,114 @@ public static class EightPlayerPatcher {
 	const uint GetAsyncKeyStateIat = 0x115A1558;
 	const uint ResyncKeyPrevVa = 0x11CB1534;   // key held last frame (second reserved .data dword)
 
+	// v1.12: the engine's resync is built for 2 players. FUN_10efa140 goes 1 -> 2 (I accepted) / 3 (the other
+	// accepted) -> 4 (both), and in state 4 the host saves and sends the campaign at once. With 3-8 players the
+	// host sent after the FIRST other player accepted; anyone not ready yet (still loading, or unable to start a
+	// resync) missed it and stayed on the old campaign: turns stuck for good. A half-finished resync anywhere
+	// (state != 0) also blocked every later one, the host's key included.
+	//   - Host: remote accepts (value 1) are counted ([accepts]); state 4 is held back as 2 until every other
+	//     connected player (FUN_10f0eb00 - 1) has accepted. After ResyncWaitFrames the frame hook sends anyway.
+	//   - Value 3 = host reset (the key): a PC whose resync is past the accept stage (4+) aborts it (FUN_10f25890,
+	//     the engine's own reset) and starts again; one in state 2 sends its accept again so the new count has it.
+	//   - Value 2 (a PC that started a pending resync) only starts idle PCs, as before; it never aborts anything.
+	//   - A force that arrives while a PC can't start a resync yet sets "pending": the frame hook starts it later.
+	const uint ResyncAbort = 0x10F25890;       // fastcall(resync): state 0, free the buffer
+	const uint ResyncAcceptsVa = 0x11CB1808;   // host: other players' accepts in this resync
+	const uint ResyncWaitVa = 0x11CB180C;      // host: frames spent waiting for the rest
+	const int ResyncWaitFrames = 2400;
+
 	static uint EmitForcedResyncAnswer(Asm a) {
+		// thiscall(resync; session, is_local, value) ret 0Ch
 		uint at = a.Here;
-		a.Raw(0x80, 0x7C, 0x24, 0x0C, 0x02);              // cmp byte ptr [esp+0Ch],2   (accept == force?)
-		a.J8(0x75, "go");                                 // jne go
-		a.Raw(0xC6, 0x44, 0x24, 0x0C, 0x01);              // mov byte ptr [esp+0Ch],1   (counts as a normal accept)
-		a.Raw(0x83, 0x79, 0x30, 0x00);                    // cmp dword ptr [ecx+30h],0  (no resync running)
-		a.J8(0x75, "go");                                 // jne go
-		a.Raw(0x51);                                      // push ecx
-		a.Raw(0xFF, 0x74, 0x24, 0x08);                    // push dword ptr [esp+8]     (session)
-		a.Call(StartResync);                              // ecx = resync
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
+		uint B = a.Here;
+		a.Raw(0x58);                                      // pop eax               (base)
+		a.Raw(0x80, 0x7C, 0x24, 0x0C, 0x01);              // cmp byte ptr [esp+0Ch],1   (a plain accept)
+		a.J8(0x75, "fa_notacc");
+		a.Raw(0x80, 0x7C, 0x24, 0x08, 0x00);              // cmp byte ptr [esp+8],0     (from another PC)
+		a.J8(0x75, "fa_answer");
+		a.Raw(0xFF, 0x80); Imm(a, ResyncAcceptsVa - B);   // inc dword [eax+accepts]
+		a.J8(0xEB, "fa_answer");
+		a.Mark("fa_notacc");
+		a.Raw(0x8A, 0x54, 0x24, 0x0C);                    // mov dl,[esp+0Ch]
+		a.Raw(0x80, 0xFA, 0x02); a.J8(0x72, "fa_answer"); // 0 = decline: the original handles it
+		a.Raw(0x80, 0xFA, 0x03); a.J8(0x77, "fa_answer");
+		a.Raw(0xC6, 0x44, 0x24, 0x0C, 0x01);              // mov byte ptr [esp+0Ch],1   (counts as an accept)
+		a.Raw(0x83, 0x79, 0x30, 0x00); a.J8(0x74, "fa_start");   // idle: start one
+		a.Raw(0x80, 0xFA, 0x03); a.J8(0x75, "fa_answer"); // only the host's reset goes further
+		a.Raw(0x80, 0x7C, 0x24, 0x08, 0x00); a.J8(0x75, "fa_answer");   // our own reset (host aborted already)
+		a.Raw(0x83, 0x79, 0x30, 0x03); a.J8(0x77, "fa_abort");   // past the accept stage: start over
+		a.Raw(0x83, 0x79, 0x30, 0x02); a.J8(0x75, "fa_answer");
+		a.Raw(0x51);                                      // state 2: accept again for the host's new count
+		a.Raw(0x6A, 0x01, 0x8B, 0x4C, 0x24, 0x0C);        // push 1 / mov ecx,[esp+0Ch]   (session)
+		a.Call(SendResyncAnswer);
+		a.Raw(0x59); a.J8(0xEB, "fa_answer");
+		a.Mark("fa_abort");
+		a.Raw(0x51); a.Call(ResyncAbort); a.Raw(0x59);    // push ecx / call / pop ecx
+		a.Mark("fa_start");
+		a.Raw(0x51, 0xFF, 0x74, 0x24, 0x08);              // push ecx / push [esp+8]  (session)
+		a.Call(StartResync);
+		a.Raw(0x59);
+		a.Raw(0x83, 0x79, 0x30, 0x00); a.J8(0x75, "fa_answer");   // started
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // can't start yet: the frame hook retries
+		uint B2 = a.Here;
+		a.Raw(0x58, 0xC7, 0x80); Imm(a, ResyncPendingVa - B2); Imm(a, 1);
+		a.Mark("fa_answer");
+		a.Raw(0x51);                                      // push ecx                 (resync)
+		a.Raw(0xFF, 0x74, 0x24, 0x10, 0xFF, 0x74, 0x24, 0x10, 0xFF, 0x74, 0x24, 0x10);   // same 3 arguments
+		a.Call(ResyncAnswer);
 		a.Raw(0x59);                                      // pop ecx
-		a.Mark("go");
-		a.Jmp(ResyncAnswer);
+		// host: don't send the campaign until every other player has accepted
+		a.Raw(0x83, 0x79, 0x30, 0x04); a.J8(0x75, "fa_ret");
+		a.Raw(0x51, 0x8B, 0x4C, 0x24, 0x08);              // push ecx / mov ecx,[esp+8]  (session)
+		a.Call(SessionIsHost);
+		a.Raw(0x84, 0xC0); a.J8(0x74, "fa_pop");
+		a.Raw(0x8B, 0x4C, 0x24, 0x08, 0x81, 0xC1, 0xF4, 0x8E, 0x05, 0x00);   // lea: ecx = session+58EF4h
+		a.Call(CountPlayers);
+		a.Raw(0x48);                                      // dec eax                  (other players)
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);
+		uint B3 = a.Here;
+		a.Raw(0x5A);                                      // pop edx
+		a.Raw(0x3B, 0x82); Imm(a, ResyncAcceptsVa - B3);  // cmp eax,[edx+accepts]
+		a.J8(0x76, "fa_pop");                             // jbe: everyone accepted
+		a.Raw(0x59, 0xC7, 0x41, 0x30, 0x02, 0x00, 0x00, 0x00);   // pop ecx / state 2: wait for the rest
+		a.J8(0xEB, "fa_ret");
+		a.Mark("fa_pop");
+		a.Raw(0x59);
+		a.Mark("fa_ret");
+		a.Raw(0xC2, 0x0C, 0x00);                          // ret 0Ch
 		a.Resolve();
 		return at;
+	}
+
+	// every frame (frame hook pushad block, [ebp+58h] = session): host bookkeeping for the accept count
+	static void EmitResyncWait(Asm a) {
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);
+		uint B = a.Here;
+		a.Raw(0x5B);                                      // pop ebx
+		a.Raw(0x8B, 0x4D, 0x58, 0x85, 0xC9); a.J8(0x74, "rw_done");   // session
+		a.Raw(0x8B, 0xB1, 0x78, 0xBE, 0x02, 0x00, 0x85, 0xF6); a.J8(0x74, "rw_done");   // esi = resync
+		a.Raw(0x8B, 0x46, 0x30);                          // mov eax,[esi+30h]
+		a.Raw(0x85, 0xC0); a.J8(0x75, "rw_active");
+		a.Raw(0x89, 0x83); Imm(a, ResyncAcceptsVa - B);   // idle: reset the count and the wait
+		a.Raw(0x89, 0x83); Imm(a, ResyncWaitVa - B);
+		a.J8(0xEB, "rw_done");
+		a.Mark("rw_active");
+		a.Raw(0x83, 0xF8, 0x02); a.J8(0x75, "rw_reset_wait");   // waiting for the others (host in state 2)
+		a.Raw(0x83, 0xBB); Imm(a, ResyncAcceptsVa - B); a.Raw(0x00);
+		a.J8(0x74, "rw_reset_wait");                      // nobody accepted yet: not this case
+		a.Raw(0xFF, 0x83); Imm(a, ResyncWaitVa - B);      // inc dword [wait]
+		a.Raw(0x81, 0xBB); Imm(a, ResyncWaitVa - B); Imm(a, (uint)ResyncWaitFrames);
+		a.J8(0x72, "rw_done");
+		a.Call(SessionIsHost);                            // waited long enough: the host sends anyway (ecx = session)
+		a.Raw(0x84, 0xC0); a.J8(0x74, "rw_reset_wait");
+		a.Raw(0xC7, 0x46, 0x30, 0x04, 0x00, 0x00, 0x00);  // state 4
+		a.Mark("rw_reset_wait");
+		a.Raw(0xC7, 0x83); Imm(a, ResyncWaitVa - B); Imm(a, 0);
+		a.Mark("rw_done");
+		a.Raw(0x61);
+		a.Resolve();
 	}
 
 	// polled once per frame from the frame hook (ebp = owner, [ebp+58h] = session); keeps every register
@@ -1590,16 +1684,19 @@ public static class EightPlayerPatcher {
 		a.Raw(0x8B, 0x81, 0x78, 0xBE, 0x02, 0x00);        // mov eax,[ecx+2BE78h]    (resync state)
 		a.Raw(0x85, 0xC0);                                // test eax,eax
 		a.J8(0x74, "done");                               // jz done
-		a.Raw(0x83, 0x78, 0x30, 0x00);                    // cmp dword ptr [eax+30h],0
-		a.J8(0x75, "done");                               // jne done
 		a.Raw(0x8B, 0xF0);                                // mov esi,eax
-		a.Raw(0x51);                                      // push ecx                (session)
+		a.Raw(0x83, 0x7E, 0x30, 0x00);                    // cmp dword ptr [esi+30h],0
+		a.J8(0x74, "fresh");                              // a resync is stuck or running: cancel it first
+		a.Raw(0x8B, 0xCE); a.Call(ResyncAbort);           // mov ecx,esi / FUN_10f25890
+		a.Mark("fresh");
+		a.Raw(0xC7, 0x87); Imm(a, ResyncAcceptsVa - ResyncKeyPrevVa); Imm(a, 0);   // new count of accepts
+		a.Raw(0x8B, 0x4D, 0x58, 0x51);                    // mov ecx,[ebp+58h] / push ecx  (session)
 		a.Raw(0x8B, 0xCE);                                // mov ecx,esi
 		a.Call(StartResync);                              // the host's own resync (popup + auto-accept)
 		a.Raw(0x83, 0x7E, 0x30, 0x00);                    // cmp dword ptr [esi+30h],0
 		a.J8(0x74, "done");                               // je done                 (not on the campaign map)
 		a.Raw(0x8B, 0x4D, 0x58);                          // mov ecx,[ebp+58h]
-		a.Raw(0x6A, 0x02);                                // push 2                  (force: everyone else joins)
+		a.Raw(0x6A, 0x03);                                // push 3                  (host reset: everyone starts over and joins)
 		a.Call(SendResyncAnswer);                         // ecx = session
 		a.J8(0xEB, "done");                               // jmp done
 		a.Mark("up");
@@ -2125,6 +2222,7 @@ public static class EightPlayerPatcher {
 		uint saveNameAt = EmitSaveName(s);
 		RedirectCall(SaveNameAssignCall, WStrAssign, saveNameAt);
 		ReserveDataDword(ReconcileEnvVa); ReserveDataDword(ReconcileWaitVa);
+		ReserveDataDword(ResyncAcceptsVa); ReserveDataDword(ResyncWaitVa);
 		ReserveDataDword(PhantomVa + 0xFC);                     // the stand-in member entry
 		AddSection(".s2mp", s.Bytes);
 
