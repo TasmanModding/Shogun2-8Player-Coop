@@ -27,7 +27,7 @@ Builds on the 4-player campaign mod. Installing this one removes the 4-player mo
 | **Battle desync: no more kick** | A battle can't be resynced, so the game used to drop the out-of-sync player. Now the battle carries on for everyone. The out-of-sync player's view may drift (a unit alive on their screen that is dead for others). Back on the campaign map, the host's state is copied to everyone by the campaign resync. |
 
 ## Community
-Join the **Tasman Modding Discord** for help, finding players, bug reports and updates: https://discord.gg/medh2d8nk
+Join the **Tasman Modding Discord** for help, finding players, bug reports and updates: https://discord.gg/vt4JbH79Np
 
 ## Install / uninstall
 1. Everyone closes Shogun 2.
@@ -35,7 +35,7 @@ Join the **Tasman Modding Discord** for help, finding players, bug reports and u
    `powershell -ExecutionPolicy Bypass -File install.ps1 -GamePath "D:\...\Total War SHOGUN 2"`.
 3. Start Shogun 2 from Steam and host a multiplayer campaign.
 
-**Updating:** every new version is published on [GitHub](https://github.com/TasmanModding/Shogun2-8Player-Coop/releases/latest). Steam Workshop can only share `.pack` files, so it can't update the engine part of the mod for you. Download the newest zip, unzip it and run `Install.bat`: it replaces the old version. New versions are announced in the [Discord](https://discord.gg/medh2d8nk). Update together with your friends, since everyone needs the same version.
+**Updating:** every new version is published on [GitHub](https://github.com/TasmanModding/Shogun2-8Player-Coop/releases/latest). Steam Workshop can only share `.pack` files, so it can't update the engine part of the mod for you. Download the newest zip, unzip it and run `Install.bat`: it replaces the old version. New versions are announced in the [Discord](https://discord.gg/vt4JbH79Np). Update together with your friends, since everyone needs the same version.
 
 **`Uninstall.bat`** puts everything back. Steam's "Verify integrity of game files" also restores the original DLL.
 
@@ -107,7 +107,7 @@ Please test steps 15–20 of the test plan above and tell us what happens.
 **Fixed in v1.8:** gifted units belong only to the player they were given to; the reason for an instant close is saved in `eightplayer_errors.txt`.
 **Fixed in v1.7:** players outside a co-op battle follow it; AI clans are no longer co-op allies; leaving a battle early keeps you in the campaign.
 
-If something goes wrong, report it in the [Discord](https://discord.gg/medh2d8nk), [open an issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md) or comment on the Steam Workshop page, with: how many players, co-op or head-to-head, who was in the battle, what happened on whose screen and when, your MATCH CODE, and any `eightplayer_crash.txt`, `eightplayer_crash.dmp` or `eightplayer_errors.txt` from the game folder.
+If something goes wrong, report it in the [Discord](https://discord.gg/vt4JbH79Np), [open an issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md) or comment on the Steam Workshop page, with: how many players, co-op or head-to-head, who was in the battle, what happened on whose screen and when, your MATCH CODE, and any `eightplayer_crash.txt`, `eightplayer_crash.dmp` or `eightplayer_errors.txt` from the game folder.
 ## Known limitations - please report what you see
 The game was built for 2 players, so with 3–8 players some parts haven't been tested in real games yet:
 - Other 2-player limits may remain in parts not yet played: turn order, reinforcements joining battles, the end of a 3+ player campaign, diplomacy between humans in head-to-head.
@@ -121,7 +121,7 @@ The game was built for 2 players, so with 3–8 players some parts haven't been 
 - Campaigns started on v1.6 can keep wrong co-op settings for AI clans: start a new campaign.
 - More players means more chances of a desync, and the game always waits for the slowest connection. The automatic resync and the host's Ctrl+Shift+F9 key help.
 
-**If the game closes instantly with no error:** that isn't a crash, so no `eightplayer_crash.txt` is written: the game found a problem and closed itself. Since v1.8 the reason is saved in `eightplayer_errors.txt` in the game folder. Please report it with what happened, on whose screen and when ([Discord](https://discord.gg/medh2d8nk) or [GitHub issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md)).
+**If the game closes instantly with no error:** that isn't a crash, so no `eightplayer_crash.txt` is written: the game found a problem and closed itself. Since v1.8 the reason is saved in `eightplayer_errors.txt` in the game folder. Please report it with what happened, on whose screen and when ([Discord](https://discord.gg/vt4JbH79Np) or [GitHub issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md)).
 ## Not done yet
 - **Battle desyncs** no longer drop anyone, but the battle itself can't be resynced: the out-of-sync player's view may differ until the campaign map, where the host's state wins.
 - Two known causes are fixed (above); others may remain. Possible: Intel and AMD CPUs can give slightly different

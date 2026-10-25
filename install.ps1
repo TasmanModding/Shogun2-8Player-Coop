@@ -177,5 +177,5 @@ else { "No other mods enabled (good: fewer chances of a desync)." }
 "Installed. Reminders:"
 "  - Every player needs this mod installed (identical files), or they can't join each other."
 "  - EXPERIMENTAL. Steam no longer lists VAC for Shogun 2, but this changes the engine DLL: a spare account is the extra-safe choice."
-"  - Help, players and bug reports: https://discord.gg/medh2d8nk"
+"  - Help, players and bug reports: https://discord.gg/vt4JbH79Np"
 "  - Undo at any time:  powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall"
