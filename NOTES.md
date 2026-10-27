@@ -33,6 +33,10 @@ Tools: Ghidra 12.1.4 headless (`re/ghidra_proj`; `re/q.ps1` runs `re/query.txt` 
 | Resume lobby per-slot bytes: FUN_10f2c830 (edi = session, ebp = member) sets member [+0F6h] from FUN_10ef0b30 ([info+24h][slot]) and FUN_10ef0ae0 ([info+30h][slot]) by Steam id (newcomer -> 0); both now take the slot from the faction lookup | 10F2C8AC, 10F2C8BE call retargets | `.s2mp` |
 | Missing players (AI holds the faction): "reserved" = save faction whose player is not a member and that no newcomer took (newcomers take the first free ones). Save list FUN_10eebc70 (session+8 vtable +60h; builds header ids/names/keys/bytes from member table entries: id [+0], key [+0A4h], name [+0D4h], bytes [+0F6h]) -> its count calls (10EEBD77, 10EEC13A, FUN_101f39d0) add reserved factions and its entry call (10EEBD87, FUN_10f14e30) returns a stand-in entry (11CB1810) past the members. Frame hook, host, once per campaign env ([session+596D8h], handled env 11CB1800) after 120 frames on the map (no battle, FUN_10ef1b40([session+596F0h]) == 3, [[[11BC8FE0]+0A98h]+70h] set): reserved + human, or has a player + AI ([faction+6A0h]) -> FUN_10f25180(session; key) = CCQ_FACTION_SWITCH_HUMAN_TO_AI (handler FUN_108868f0 toggles via FUN_10600c20; same path as a player dropping out, 10F108D0) | 3 call retargets, frame stub | `.s2mp` |
 | Save name with 3+ players: FUN_106a3a30 builds "%S (%S) vs. %S (%S): %S" (co-op variant) from the save header, two players only. Its final assign (106A3DFD call FUN_100edbe0, ecx = output) -> stub: header [esp+5Ch] count [+30h] > 2 -> "Ann, Bob, ...: <date [esp+50h]>" (names max 40 chars, list cut with "..." past 150 chars, empty names skipped) | 106A3DFD call retarget | `.s2mp` |
+| Play as AI with 3+ players (v1.13): pending battle choice list [pb+0F8h] (count [+8], 20h entries [+0Ch]: key [+0], choice [+0Ch]: 1 fight, 3 spectate, 4 play as AI; CCQ_SET_PENDING_BATTLE_READY_TO_START -> FUN_105b5140). FUN_105cbb50 tested exactly 2 entries (1, 4): never true with 3+, so the chooser never got the AI army ([pb+0CCh]) and FUN_105f8b20 needed exactly 2 humans. Now: FUN_105cbb50 = some 4 and some 1; 105F8BC5 jne->jb; FUN_105cefa0 (clan saved at entry, 11CB1910) and FUN_105b7b90 give the AI army/side only to the first entry with choice 4 (FUN_105ecef0 key compare), others follow | 105CBB50 jmp (6), 105CEFA0 jmp (5), 105CF092/105CF0C2/105B7BB1 call retargets, 105F8BC5 byte | `.s2mp` |
+| Event log (v1.13): ModLog (first code in `.s2mp`; esi text, edx value, ecx 0/1 dec/2 hex) appends "HH:MM:SS.mmm text value" to eightplayer_log.txt (GetLocalTime IAT 115A1264, SetFilePointer 115A12E0; cut back at a launch if > 256 KB; started flag 11CB1920). Frame hook logs 12 watched values on change (11CB1924.., value+1): session, host, players, MpLobbyState, campaign/battle env, resync state, [session+59785h], campaign map ([[[11BC8FE0]+A98h]+70h]), battle UI ([[11BC8180]+110h]), resync pending, accepts. Desync stubs log on entry | frame stub, 10EE9A71 / 10EF9A87 stubs | `.s2mp` |
+| "Waiting for players" (battle load) on the campaign map: listener slots 1171534C -> 11153FA0 (Lua MultiplayerSetWaitingForLoad(true)) and 11715358 -> 11153F50 (false); slots redirected to log stubs that jump on (HIGHLOW relocs cover them) | 2 vtable slots | `.s2mp` |
+| Ctrl+Shift+F9 feedback (v1.13): MessageBeep via LoadLibraryA/GetProcAddress (0x40 started, 0x10 refused) + log line with the reason (no session / not host / no resync possible) | frame stub | `.s2mp` |
 | Invite buttons on slots 3..8 (frames invite_frame3..8) | 10FD5B70 (7 bytes) jmp; original wires only root.FindChild("button_invite") at 10FD5B36 | `.s2mp` + 13F |
 
 `.s2mp` is a new RX section appended after `.reloc` (one free header slot existed). Its code uses only relative
@@ -129,6 +133,25 @@ long campaigns; both players saving. No official root cause is known.
   role only ever went to an ally; in H2H with 3+ players it goes to someone allied to nobody. Prime suspect.
 - None of this mod's hooks run on that path (only the FP pin). The game's own Crash.dmp path (1000AFE0 -> 117C7950) is built but
   never used, hence the mod's crash reporter.
+
+## Tester reports after v1.12 (26 Oct 2026), not solved yet
+- **Black screen "waiting for other players" (309 s left) when a battle loads** (2 players, large overhaul mods:
+  Expanded Japan, MOSS/MUST and ~20 other packs; rebel army attacking a human city). Host's mp_battle_desync.txt:
+  desync at mp tick 8878 = battle tick 18-19, and the battle logs end at tick 19; P2's: "no battle or campaign tick
+  ranges". Checksums 0xF000000F vs 0x3F800000 (= 1.0f: maybe not a real checksum on P2). Both autosaves of that
+  moment differ (6.77 MB vs 6.71 MB, different all through), so the campaigns may already have differed.
+  The campaign-map panel is ui/common ui/waiting_for_players (class MPWaitingForPlayers, vtable 116F3738; update
+  FUN_11065ae0 reads the time left from vfunc +88h of [[[11BC8FE0]+A98h]+70h]+8 on the map, of
+  [[11BC8180]+110h]+28248h in a battle). The desync handler FUN_10ee9a50 doesn't stop a battle itself; whether the
+  v1.9 no-kick lets a desynced battle stall where vanilla dropped the player is open. v1.13's event log should show it.
+- **No weather choice with 3+ players.** The panel is ui/battle ui/pre_battle_wait (BattlePrebattleWaitPanel,
+  FUN_110e5730, opened by FUN_110d22f0 at 110D4353 when [[[setup+8]+5Ch]+13Eh] is set). That byte is argument 13 of
+  the battle-settings ctor FUN_1011d820, called from the campaign at 105BE7A0 (FUN_105be2b0): set when
+  [model+155Ch] == 0, [pb+0D0h] == 0, [pb+58h] != 1 and the attacking clan ([[pb+60h]+0Ch]+6A0h) is human. No
+  player-count test there; the wait-button panel (110CC1C0, state [setup+28278h]) is next to look at.
+- **No campaign map markers with 3+ players**: no such feature in the UI Lua; needs a description from the tester.
+- **Popup of a departed player** (Einfach nur duenn): a player who leaves with a diplomacy/bankruptcy popup open
+  blocks everyone after FUN_10f25180 hands the clan to the AI; only their own game would close it.
 
 ## Next steps
 - Get logs from a real desync (players' `logs` folder; enabling `mp_network_sync_logging` for everyone gives tick-level logs)

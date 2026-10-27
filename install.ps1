@@ -18,24 +18,11 @@ $lib = Join-Path $PSScriptRoot 'lib'
 foreach ($t in @(@('Layout', 'LayoutTool'), @('Pack', 'PackTools'), @('PackWriter', 'PackWriter'), @('EightPlayerPatcher', 'Patcher'))) {
 	if (-not ($t[0] -as [type])) { Add-Type -Path (Join-Path $lib "$($t[1]).cs") }
 }
+. (Join-Path $lib 'MatchCode.ps1')
 
 # find the game in any Steam library if no path was given
 if (-not $GamePath) {
-	$roots = @()
-	foreach ($k in 'HKCU:\Software\Valve\Steam', 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam') {
-		try { $p = (Get-ItemProperty $k -ErrorAction Stop); if ($p.SteamPath) { $roots += $p.SteamPath }; if ($p.InstallPath) { $roots += $p.InstallPath } } catch { }
-	}
-	$roots += "C:\Program Files (x86)\Steam"
-	$libs = @()
-	foreach ($r in ($roots | Select-Object -Unique)) {
-		$libs += $r
-		$vdf = Join-Path $r 'steamapps\libraryfolders.vdf'
-		if (Test-Path $vdf) { foreach ($m in [regex]::Matches((Get-Content $vdf -Raw), '"path"\s+"([^"]+)"')) { $libs += $m.Groups[1].Value.Replace('\\', '\') } }
-	}
-	foreach ($l in ($libs | Select-Object -Unique)) {
-		$c = Join-Path $l 'steamapps\common\Total War Shogun 2'
-		if (Test-Path (Join-Path $c 'empire.retail.dll')) { $GamePath = $c; break }
-	}
+	$GamePath = Find-ShogunFolder
 	if (-not $GamePath) { throw "Couldn't find Total War: Shogun 2. Run with -GamePath ""<your game folder>""." }
 }
 "Game folder: $GamePath"
@@ -149,22 +136,9 @@ finally {
 RemoveModLine $modLine          # left over from older versions of this mod (mod-type pack)
 
 # ---- 4. other mods: different data on different PCs is a classic cause of desyncs ----------------------
-# One short code from this mod's DLL and pack plus every other enabled mod (name and file hash): players with
-# the same code run the same game data.
-$others = @(ReadScriptLines | Where-Object { $_ -match '^\s*mod\s+"([^"]+)"' } | ForEach-Object { ([regex]::Match($_, '"([^"]+)"')).Groups[1].Value } | Where-Object { $_ -ne 'eightplayer_coop_lobby.pack' })   # this mod's Workshop item
-# drag-and-drop mods: movie packs (type 4) in data\ other than the game's own movies*.pack and this mod's
-foreach ($f in Get-ChildItem (Join-Path $GamePath 'data') -Filter *.pack) {
-	if ($f.Name -like 'movies*.pack' -or $f.Name -eq $packName -or $f.Name -eq 'eightplayer_coop_lobby.pack' -or $others -contains $f.Name) { continue }
-	$h = New-Object byte[] 8
-	$fs = [IO.File]::OpenRead($f.FullName); try { [void]$fs.Read($h, 0, 8) } finally { $fs.Close() }
-	if ([BitConverter]::ToUInt32($h, 4) -eq 4) { $others += $f.Name }
-}
-$parts = @((Sha $dll), (Sha $packPath))
-foreach ($o in ($others | Sort-Object)) {
-	$p = Join-Path $GamePath "data\$o"
-	$parts += $o.ToLowerInvariant() + '=' + $(if (Test-Path $p) { Sha $p } else { 'missing' })
-}
-$code = (Get-FileHash -InputStream ([IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($parts -join '|'))) -Algorithm SHA256).Hash.Substring(0, 8)
+$match = Get-MatchInfo $GamePath $UserScript
+$others = $match.Others
+$code = $match.Code
 ""
 if ($others.Count) {
 	Write-Warning "Other mods are enabled: $($others -join ', ')"

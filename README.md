@@ -1,4 +1,5 @@
 # Shogun 2: 8-player co-op campaign (experimental)
+
 **by Tasman Modding**
 
 ![8-slot lobby layout](preview/lobby_8player.png)
@@ -22,8 +23,10 @@ Builds on the 4-player campaign mod. Installing this one removes the 4-player mo
 | **Desync: save screen bug** | Opening the Save or Load screen switched that PC's maths and text rules to its Windows language for the rest of the session (e.g. decimal comma on German, Czech, French or Russian Windows), so it no longer matched the other players. This is why "only the host should save" helped. Fixed: those screens now only change how dates are shown. |
 | **Desync: floating-point drift** | The game never locked the CPU's floating-point settings, so anything that changed them on one PC (overlays, anti-virus, drivers, alt-tabbing) made that PC calculate slightly differently. Fixed: the settings are reset to the game's defaults every frame and every battle tick. |
 | **Desync recovery** | If a campaign goes out of sync, nobody is dropped: the resync starts by itself (as soon as everyone is back on the campaign map, e.g. after a battle) and every player joins it. The host waits until **every** player is ready before sending its copy of the campaign (the original game only waited for one other player). |
-| **Host resync key: Ctrl+Shift+F9** | If the campaign looks wrong or is stuck (one PC stuck on an AI's turn while another shows a player's turn, armies in different places), the **host** presses **Ctrl+Shift+F9** on the campaign map. Everyone gets the host's copy of the campaign, the same way a detected desync is fixed. Wait for the resync popup to finish. If a resync got stuck, the key cancels it on every PC and starts a fresh one. It does nothing in battles or the menus, and nothing if a client presses it. |
-| **Crash reports** | If the game crashes during a multiplayer game, it writes `eightplayer_crash.txt` (a few KB) and `eightplayer_crash.dmp` (a small dump, well under 1 MB) in the game folder, instead of Steam's 1–2 GB dump. If it closes itself instead, the reason is in `eightplayer_errors.txt`. Send these with your bug report. |
+| **Host resync key: Ctrl+Shift+F9** | If the campaign looks wrong or is stuck (one PC stuck on an AI's turn while another shows a player's turn, armies in different places), the **host** presses **Ctrl+Shift+F9** on the campaign map. Everyone gets the host's copy of the campaign, the same way a detected desync is fixed. Wait for the resync popup to finish. If a resync got stuck, the key cancels it on every PC and starts a fresh one. **It only works on the campaign map**, not in the lobby, a battle or a loading screen. You hear a "ding" when the resync starts and an error sound when it can't (the reason is written to `eightplayer_log.txt`). |
+| **Bug reports: `Report.bat`** | Double-click `Report.bat` after a problem: it writes **one text file**, `Shogun2-8Player-Report.txt`, to your Desktop with everything needed (MATCH CODE, other mods, the mod's event log, crash and error files, desync files, the game's logs). Attach that file to your report. |
+| **Event log** | The game folder gets `eightplayer_log.txt`: a timestamped line whenever the multiplayer game changes state (players joining, battle loading and ending, the "waiting for players" screen, desyncs, resyncs, Ctrl+Shift+F9). It shows where a game got stuck. `Report.bat` includes it. |
+| **Crash reports** | If the game crashes during a multiplayer game, it writes `eightplayer_crash.txt` (a few KB) in the game folder instead of Steam's 1–2 GB dump. If it closes itself instead, the reason is in `eightplayer_errors.txt`. `Report.bat` puts both into the report. |
 | **Battle desync: no more kick** | A battle can't be resynced, so the game used to drop the out-of-sync player. Now the battle carries on for everyone. The out-of-sync player's view may drift (a unit alive on their screen that is dead for others). Back on the campaign map, the host's state is copied to everyone by the campaign resync. |
 
 ## Community
@@ -45,7 +48,7 @@ Everyone must also end up with the same two hashes, or they can't join each othe
 
 | File | SHA-256 |
 |---|---|
-| `empire.retail.dll` | `E6722B2088594A31938C50B41848ED1241BBC60C5B0F020D30D7B7B5B0F0E650` |
+| `empire.retail.dll` | `E2AFE95706AAE39B005A23A1046FBC8C1FEB09967883BE6892192BF1F92E2EBE` |
 | `data\eightplayer_coop.pack` | `983F63E02958AF253B911934680AEE736CED160B2BB9FC152023EBCF479853F5` |
 
 ## Before you play
@@ -53,16 +56,31 @@ Everyone must also end up with the same two hashes, or they can't join each othe
 - It only works on the current Steam version of the game; the installer refuses anything else.
 - Start with the main Sengoku Jidai campaign. Rise of the Samurai and Fall of the Samurai have special clan rules in the lobby.
 - To give desyncs fewer chances: everyone has **no other mods** enabled and the **same game version**.
-  If one still happens, copy everyone's `logs` folder: that shows exactly what drifted.
+  If one still happens, every player runs `Report.bat` and sends the text file it puts on the Desktop.
+- **Big overhaul mods** (Expanded Japan, MOSS/MUST, unit and AI packs...) make desyncs much more likely, above all
+  when a battle starts. Every player must have exactly the same ones (same MATCH CODE). If battles hang on
+  "waiting for other players", try the same battle with only this mod enabled.
+
+## Head-to-head vs co-op
+- **Co-op:** every human player is on one team. Humans can't attack each other and share the co-op rules; AI clans
+  are never on the team (ally with them or break alliances normally).
+- **Head-to-head:** there are no fixed teams: every human is their own clan, like an AI clan. Not 4v4: humans make
+  and break alliances through diplomacy, and any two humans can fight. In a battle, the two sides are the armies
+  involved; every human who isn't in it can **watch** it, or **play as the AI army** if the other side is AI
+  (the first player who picks that gets it). The others wait until it ends.
+- **Gifting units in battle** is meant for co-op: the player fighting gives units to the players watching, so they
+  can join in. In head-to-head the game doesn't stop either side gifting units to watchers yet, so agree on house
+  rules (e.g. no gifting in human-vs-human battles).
 
 ## If something goes wrong
 | Problem | Fix |
 |---|---|
 | "Out of sync" popup on the map | Nothing to do: the resync runs by itself. |
-| Stuck turn, or players see different things on the map | Host presses **Ctrl+Shift+F9** on the campaign map. |
+| Stuck turn, or players see different things on the map | Host presses **Ctrl+Shift+F9** on the campaign map (listen for the "ding"). |
 | Desync during a battle | Keep playing; when you're back on the map the resync fixes it (host can press Ctrl+Shift+F9 to be sure). |
+| Battle never loads ("waiting for other players") | Everyone quits; the host resumes the newest save (Resume as Host) and everyone rejoins. Then everyone runs `Report.bat` and sends the report: this is being investigated. |
 | Can't join, or desyncs straight away | Compare MATCH CODEs; turn off other mods until they're the same. |
-| A game crashed | Everyone quits; the host loads the newest save and sends it to the others (only the host saves). |
+| A game crashed | Everyone quits; the host loads the newest save and sends it to the others (only the host saves). Everyone runs `Report.bat` and sends the text file from the Desktop. |
 
 ## Test plan
 Please report the step where it breaks, what you saw, and copy the newest files from the game's `logs` folder.
@@ -86,6 +104,21 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 18. Resume a save with one player missing: a few seconds after the map appears, their clan is AI-controlled. Play a turn and save.
 19. Rehost that save with the missing player back: they get their own clan back and control it again.
 20. Save a 3+ player game: the save is named after every player.
+21. 3+ players: player 1 attacks an AI army; a player not in the battle picks **Play as AI**: they command the AI army, the others watch.
+22. Host presses Ctrl+Shift+F9 on the campaign map: a "ding", and the resync runs. In the lobby: an error sound, nothing else.
+23. Everyone runs `Report.bat`: a text file appears on the Desktop with the MATCH CODE and the event log.
+
+## v1.13: Play as AI, Ctrl+Shift+F9 feedback, one-file bug reports
+- **Play as AI works with 3+ players.** The game only understood "Play as AI" with exactly 2 players. With 3+ players the player who chose it never got the AI army (and in the unmodded game the game closed). Now the first player who chooses Play as AI controls the AI army, and everyone else watching follows the battle as usual.
+- **Ctrl+Shift+F9 tells you what it did:** a "ding" when the resync starts, an error sound when it can't (lobby, battle, loading screen, or a client pressed it). The reason goes into `eightplayer_log.txt`.
+- **`Report.bat`:** one plain-text file on your Desktop with everything a bug report needs. No more hunting for log folders.
+- **Event log** (`eightplayer_log.txt`): shows step by step what the game did before something went wrong, e.g. where a battle got stuck loading.
+- **Head-to-head explained** (see "Head-to-head vs co-op" above).
+
+**Being investigated, please report with `Report.bat`:**
+- Battles that never load (black screen, "waiting for other players"). The logs we have so far all come from games with large overhaul mods, where the battle went out of sync within its first second. v1.13's event log will show what each PC was doing.
+- With 3+ players: no weather choice before a battle, and no markers on the campaign map. Please tell us what you expected to see and where (screenshot from a 2-player game helps).
+- A player who leaves while a popup of theirs is open (diplomacy offer, bankruptcy) can block everyone after the AI takes their clan.
 
 ## v1.12: resync fixed for 3+ players
 - **Resync reaches everyone.** The game's resync was built for 2 players: the host sent its copy of the campaign as soon as *one* other player was ready. With 3+ players, anyone not ready yet missed it and stayed on the old campaign, so turns got stuck for good. Now the host waits until every player is ready (or about a minute, if one PC never answers).
@@ -107,11 +140,10 @@ Please test steps 15–20 of the test plan above and tell us what happens.
 **Fixed in v1.8:** gifted units belong only to the player they were given to; the reason for an instant close is saved in `eightplayer_errors.txt`.
 **Fixed in v1.7:** players outside a co-op battle follow it; AI clans are no longer co-op allies; leaving a battle early keeps you in the campaign.
 
-If something goes wrong, report it in the [Discord](https://discord.gg/vt4JbH79Np), [open an issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md) or comment on the Steam Workshop page, with: how many players, co-op or head-to-head, who was in the battle, what happened on whose screen and when, your MATCH CODE, and any `eightplayer_crash.txt`, `eightplayer_crash.dmp` or `eightplayer_errors.txt` from the game folder.
+If something goes wrong, report it in the [Discord](https://discord.gg/vt4JbH79Np), [open an issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md) or comment on the Steam Workshop page, with: how many players, co-op or head-to-head, who was in the battle, what happened on whose screen and when, and **every player's** `Shogun2-8Player-Report.txt` from `Report.bat`.
 ## Known limitations - please report what you see
 The game was built for 2 players, so with 3–8 players some parts haven't been tested in real games yet:
 - Other 2-player limits may remain in parts not yet played: turn order, reinforcements joining battles, the end of a 3+ player campaign, diplomacy between humans in head-to-head.
-- With 3+ players, several players not in a battle could choose "play as AI" for the same AI army.
 - In head-to-head, a player fighting a battle may be able to gift units to a player watching it.
 - Watchers in head-to-head see the game's default battle result screen (nobody is allied).
 - Resumed games can be joined by anyone who finds them: use a password or friends-only if you don't want strangers taking a missing player's clan.
@@ -121,7 +153,7 @@ The game was built for 2 players, so with 3–8 players some parts haven't been 
 - Campaigns started on v1.6 can keep wrong co-op settings for AI clans: start a new campaign.
 - More players means more chances of a desync, and the game always waits for the slowest connection. The automatic resync and the host's Ctrl+Shift+F9 key help.
 
-**If the game closes instantly with no error:** that isn't a crash, so no `eightplayer_crash.txt` is written: the game found a problem and closed itself. Since v1.8 the reason is saved in `eightplayer_errors.txt` in the game folder. Please report it with what happened, on whose screen and when ([Discord](https://discord.gg/vt4JbH79Np) or [GitHub issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md)).
+**If the game closes instantly with no error:** that isn't a crash, so no `eightplayer_crash.txt` is written: the game found a problem and closed itself. Since v1.8 the reason is saved in `eightplayer_errors.txt` in the game folder. Run `Report.bat` and report it with what happened, on whose screen and when ([Discord](https://discord.gg/vt4JbH79Np) or [GitHub issue](https://github.com/TasmanModding/Shogun2-8Player-Coop/issues/new?template=crash_report.md)).
 ## Not done yet
 - **Battle desyncs** no longer drop anyone, but the battle itself can't be resynced: the out-of-sync player's view may differ until the campaign map, where the host's state wins.
 - Two known causes are fixed (above); others may remain. Possible: Intel and AMD CPUs can give slightly different
@@ -131,6 +163,8 @@ The game was built for 2 players, so with 3–8 players some parts haven't been 
 | Path | What |
 |---|---|
 | `Install.bat`, `Uninstall.bat`, `install.ps1` | installer / uninstaller |
+| `Report.bat`, `report.ps1` | writes the one-file bug report to the Desktop (reads files only) |
+| `lib\MatchCode.ps1` | MATCH CODE and game-folder search (used by the installer and the report) |
 | `build_lobby_layout.ps1`, `build_load_layout.ps1` | build the 8-slot lobby and the 8-player Load screen from your own copy of the game |
 | `lib\Patcher.cs` | builds the patched engine DLL (checks the original first) |
 | `lib\LayoutTool.cs`, `lib\PackTools.cs`, `lib\PackWriter.cs` | read/write UI layouts and `.pack` files |

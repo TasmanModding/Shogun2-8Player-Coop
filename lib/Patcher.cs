@@ -465,7 +465,7 @@ public static class EightPlayerPatcher {
 	const uint GetCurrentThreadIdIat = 0x115A11F4;
 	const uint CrashPrevFilterVa = 0x11CB1538;   // previous filter (third reserved .data dword)
 	const uint CrashInstalledVa = 0x11CB153C;    // filter installed (fourth)
-	public const string Version = "1.12";
+	public const string Version = "1.13";
 	static uint crashFilterAt;
 
 	// ---- engine error log ------------------------------------------------------------------------------
@@ -1040,6 +1040,108 @@ public static class EightPlayerPatcher {
 		a.Resolve();
 	}
 
+	// ---- "Play as AI" with 3+ players (v1.13) --------------------------------------------------------------
+	// A player not in a battle can "Play as AI" (CCQ_SET_PENDING_BATTLE_READY_TO_START, choice 4; spectate = 3).
+	// The pending battle keeps one entry per human ([pb+0F8h]: count [+8], 20h-byte entries [+0Ch]: faction key
+	// [+0], choice [+0Ch]). FUN_105cbb50 ("a human plays the AI army") tested exactly 2 entries: entry 0 = 1,
+	// entry 1 = 4. With 3+ humans it was never true, so the chooser never got the AI army; FUN_105f8b20 (gives the
+	// AI army to a human) also required exactly 2 humans. And where it was true, FUN_105cefa0 (what a player
+	// outside the battle controls) and FUN_105b7b90 (a clan's battle side) gave the AI army to EVERY non-fighter.
+	//   - FUN_105cbb50 -> any entry chose 4 and any entry chose 1 (2+ entries).
+	//   - FUN_105f8b20: humans == 2 -> >= 2.
+	//   - FUN_105cefa0 / FUN_105b7b90: only the first entry that chose 4 gets the AI army; any other player outside
+	//     the battle follows it as before.
+	const uint AiPlayedCheck = 0x105CBB50;          // fastcall(pb+0F8h) -> al; 6 bytes replaced by a jmp
+	const uint AiArmyHumansJump = 0x105F8BC5;       // cmp ebx,2 / jne (75 23) -> jb
+	const uint NonParticipantEntry = 0x105CEFA0;    // sub esp,0Ch / push esi / push edi (5 bytes); [esp+8] = clan
+	const uint NonParticipantEntryResume = 0x105CEFA5;
+	static readonly uint[] NonParticipantAiCalls = { 0x105CF092, 0x105CF0C2 };
+	const uint SideOfClanAiCall = 0x105B7BB1;       // in FUN_105b7b90; clan = [esp+10h] in the stub
+	const uint AskingClanVa = 0x11CB1910;
+
+	static uint EmitAiPlayedCheck(Asm a) {
+		// ecx = choice list -> al = some human chose "play as AI" (4) and one fights (1); keeps all but eax
+		uint at = a.Here;
+		a.Raw(0x52, 0x51);                                // push edx / push ecx
+		a.Raw(0x33, 0xD2);                                // dl = seen 4, dh = seen 1
+		a.Raw(0x8B, 0x41, 0x08, 0x83, 0xF8, 0x02); a.J8(0x72, "ap_out");   // fewer than 2 entries
+		a.Raw(0x8B, 0x49, 0x0C);                          // mov ecx,[ecx+0Ch]
+		a.Mark("ap_l");
+		a.Raw(0x83, 0x79, 0x0C, 0x04); a.J8(0x75, "ap_n4");
+		a.Raw(0xB2, 0x01);                                // mov dl,1
+		a.Mark("ap_n4");
+		a.Raw(0x83, 0x79, 0x0C, 0x01); a.J8(0x75, "ap_n1");
+		a.Raw(0xB6, 0x01);                                // mov dh,1
+		a.Mark("ap_n1");
+		a.Raw(0x83, 0xC1, 0x20, 0x48); a.J8(0x75, "ap_l");   // add ecx,20h / dec eax
+		a.Mark("ap_out");
+		a.Raw(0x84, 0xD2, 0x0F, 0x95, 0xC0);              // test dl,dl / setne al
+		a.Raw(0x84, 0xF6, 0x0F, 0x95, 0xC2, 0x22, 0xC2);  // test dh,dh / setne dl / and al,dl
+		a.Raw(0x59, 0x5A, 0xC3);                          // pop ecx / pop edx / ret
+		a.Resolve();
+		return at;
+	}
+
+	// ecx = choice list, edx = clan -> al = this clan is the (first) one playing the AI army
+	static uint EmitAiChooserTest(Asm a, uint aiPlayed) {
+		uint at = a.Here;
+		a.Call(aiPlayed);
+		a.Raw(0x84, 0xC0); a.J8(0x75, "ac_who");
+		a.Raw(0xC3);
+		a.Mark("ac_who");
+		a.Raw(0x53, 0x56, 0x57, 0x51);                    // push ebx/esi/edi/ecx
+		a.Raw(0x8B, 0xFA);                                // mov edi,edx       (clan)
+		a.Raw(0x8B, 0x59, 0x08, 0x8B, 0x71, 0x0C);        // ebx = count / esi = entries
+		a.Mark("ac_l");
+		a.Raw(0x85, 0xDB); a.J8(0x74, "ac_no");
+		a.Raw(0x83, 0x7E, 0x0C, 0x04); a.J8(0x74, "ac_first");
+		a.Raw(0x83, 0xC6, 0x20, 0x4B); a.J8(0xEB, "ac_l");   // add esi,20h / dec ebx
+		a.Mark("ac_first");                               // the first "play as AI" entry: is it this clan?
+		a.Raw(0x8B, 0xCF); a.Call(FactionKey);            // eax = clan's key
+		a.Raw(0x56, 0x8B, 0xC8); a.Call(WStrEquals);      // push entry key / ecx = clan key
+		a.J8(0xEB, "ac_out");
+		a.Mark("ac_no");
+		a.Raw(0x32, 0xC0);
+		a.Mark("ac_out");
+		a.Raw(0x59, 0x5F, 0x5E, 0x5B, 0xC3);              // pop ecx/edi/esi/ebx / ret
+		a.Resolve();
+		return at;
+	}
+
+	static uint EmitNonParticipantEntry(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x8B, 0x44, 0x24, 0x08);                    // mov eax,[esp+8]   (clan asked about)
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);
+		uint B = a.Here;
+		a.Raw(0x5A, 0x89, 0x82); Imm(a, AskingClanVa - B);   // pop edx / mov [edx+clan],eax
+		a.Raw(0x83, 0xEC, 0x0C, 0x56, 0x57);              // sub esp,0Ch / push esi / push edi   (replaced)
+		a.Jmp(NonParticipantEntryResume);
+		a.Resolve();
+		return at;
+	}
+
+	// replaces "call FUN_105cbb50" in FUN_105cefa0 (clan saved at its entry)
+	static uint EmitNonParticipantAiCall(Asm a, uint chooser) {
+		uint at = a.Here;
+		a.Raw(0x52);                                      // push edx
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);
+		uint B = a.Here;
+		a.Raw(0x5A, 0x8B, 0x92); Imm(a, AskingClanVa - B);   // pop edx / mov edx,[edx+clan]
+		a.Call(chooser);
+		a.Raw(0x5A, 0xC3);                                // pop edx / ret
+		a.Resolve();
+		return at;
+	}
+
+	// replaces "call FUN_105cbb50" in FUN_105b7b90 (clan = its first argument, [esp+10h] here)
+	static uint EmitSideOfClanAiCall(Asm a, uint chooser) {
+		uint at = a.Here;
+		a.Raw(0x52, 0x8B, 0x54, 0x24, 0x14);              // push edx / mov edx,[esp+14h]
+		a.Call(chooser);
+		a.Raw(0x5A, 0xC3);
+		return at;
+	}
+
 	// ---- default save name with 3+ players ---------------------------------------------------------------
 	// FUN_106a3a30 names a multiplayer save "Host (Clan) vs. Other (Clan): date" (or the co-op form) from the
 	// save's player list, which only ever shows two players. With 3+ players the name is now
@@ -1314,6 +1416,7 @@ public static class EightPlayerPatcher {
 		EmitCrashFilter(a);
 		uint at = a.Here;
 		EmitCrashFilterInstall(a);
+		EmitStateWatch(a);
 		EmitResyncKeyPoll(a);
 		EmitPendingResync(a);
 		EmitResyncWait(a);
@@ -1357,6 +1460,9 @@ public static class EightPlayerPatcher {
 
 	static uint EmitBattleNoKick(Asm a) {
 		uint at = a.Here;
+		a.Raw(0x50, 0x33, 0xC0, 0x83, 0xBF, 0xCC, 0x96, 0x05, 0x00, 0x00, 0x0F, 0x95, 0xC0);   // push eax / eax = battle running
+		EmitLog(a, "DESYNC detected on this PC (1 = during a battle, 0 = on the campaign map)", 1);
+		a.Raw(0x58);                                      // pop eax
 		a.Raw(0x83, 0xBF, 0xD4, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [edi+596D4h],0   (campaign?  edi = session+4)
 		a.J8(0x75, "campaign");
 		a.Raw(0x83, 0xBF, 0xCC, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [edi+596CCh],0   (battle running?)
@@ -1399,6 +1505,9 @@ public static class EightPlayerPatcher {
 
 	static uint EmitReportNoKick(Asm a) {
 		uint at = a.Here;
+		a.Raw(0x50, 0x33, 0xC0, 0x83, 0xBB, 0xD0, 0x96, 0x05, 0x00, 0x00, 0x0F, 0x95, 0xC0);   // push eax / eax = battle running
+		EmitLog(a, "DESYNC reported by another player (1 = during a battle, 0 = on the campaign map)", 1);
+		a.Raw(0x58);                                      // pop eax
 		a.Raw(0x83, 0xBB, 0xD8, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [ebx+596D8h],0   (campaign)
 		a.J32("skip", 0x0F, 0x85);                        // jne -> no kick
 		a.Raw(0x83, 0xBB, 0xD0, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [ebx+596D0h],0
@@ -1658,6 +1767,9 @@ public static class EightPlayerPatcher {
 	}
 
 	// polled once per frame from the frame hook (ebp = owner, [ebp+58h] = session); keeps every register
+	// v1.13: every press is answered: a beep (OK sound when the resync starts, error sound otherwise) and a line in
+	// eightplayer_log.txt saying what happened. Testers pressed it in the lobby and on loading screens, where it
+	// can't work, and couldn't tell whether anything had happened.
 	static void EmitResyncKeyPoll(Asm a) {
 		a.Raw(0x60);                                      // pushad
 		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);              // call $+5
@@ -1672,21 +1784,23 @@ public static class EightPlayerPatcher {
 			a.J32("up", 0x0F, 0x84);                      // jz up
 		}
 		a.Raw(0x83, 0x3F, 0x00);                          // cmp dword ptr [edi],0   (only on the press itself)
-		a.J8(0x75, "done");                               // jne done
+		a.J32("done", 0x0F, 0x85);                        // jne done
 		a.Raw(0xC7, 0x07, 0x01, 0x00, 0x00, 0x00);        // mov dword ptr [edi],1
 		a.Raw(0x8B, 0x4D, 0x58);                          // mov ecx,[ebp+58h]       (session)
 		a.Raw(0x85, 0xC9);                                // test ecx,ecx
-		a.J8(0x74, "done");                               // jz done
+		a.J32("k_nosession", 0x0F, 0x84);
 		a.Call(SessionIsHost);
 		a.Raw(0x84, 0xC0);                                // test al,al
-		a.J8(0x74, "done");                               // jz done
+		a.J32("k_nothost", 0x0F, 0x84);
 		a.Raw(0x8B, 0x4D, 0x58);                          // mov ecx,[ebp+58h]
 		a.Raw(0x8B, 0x81, 0x78, 0xBE, 0x02, 0x00);        // mov eax,[ecx+2BE78h]    (resync state)
 		a.Raw(0x85, 0xC0);                                // test eax,eax
-		a.J8(0x74, "done");                               // jz done
+		a.J32("k_cant", 0x0F, 0x84);
 		a.Raw(0x8B, 0xF0);                                // mov esi,eax
 		a.Raw(0x83, 0x7E, 0x30, 0x00);                    // cmp dword ptr [esi+30h],0
 		a.J8(0x74, "fresh");                              // a resync is stuck or running: cancel it first
+		a.Raw(0x8B, 0x46, 0x30);                          // mov eax,[esi+30h]
+		EmitLog(a, "Ctrl+Shift+F9: cancelling the resync that was still running, state", 1);
 		a.Raw(0x8B, 0xCE); a.Call(ResyncAbort);           // mov ecx,esi / FUN_10f25890
 		a.Mark("fresh");
 		a.Raw(0xC7, 0x87); Imm(a, ResyncAcceptsVa - ResyncKeyPrevVa); Imm(a, 0);   // new count of accepts
@@ -1694,16 +1808,229 @@ public static class EightPlayerPatcher {
 		a.Raw(0x8B, 0xCE);                                // mov ecx,esi
 		a.Call(StartResync);                              // the host's own resync (popup + auto-accept)
 		a.Raw(0x83, 0x7E, 0x30, 0x00);                    // cmp dword ptr [esi+30h],0
-		a.J8(0x74, "done");                               // je done                 (not on the campaign map)
+		a.J32("k_cant", 0x0F, 0x84);                      // not on the campaign map
 		a.Raw(0x8B, 0x4D, 0x58);                          // mov ecx,[ebp+58h]
 		a.Raw(0x6A, 0x03);                                // push 3                  (host reset: everyone starts over and joins)
 		a.Call(SendResyncAnswer);                         // ecx = session
-		a.J8(0xEB, "done");                               // jmp done
+		a.Raw(0x8B, 0x4D, 0x58, 0x81, 0xC1, 0xF4, 0x8E, 0x05, 0x00);   // ecx = session+58EF4h (members)
+		a.Call(CountPlayers);
+		EmitLog(a, "Ctrl+Shift+F9: resync started; players in the game", 1);
+		EmitBeep(a, 0x40);                                // MB_ICONINFORMATION
+		a.J32("done", 0xE9);
+		a.Mark("k_nosession");
+		EmitLog(a, "Ctrl+Shift+F9 ignored: not in a multiplayer game", 0);
+		a.J32("k_err", 0xE9);
+		a.Mark("k_nothost");
+		EmitLog(a, "Ctrl+Shift+F9 ignored: only the host can start a resync", 0);
+		a.J32("k_err", 0xE9);
+		a.Mark("k_cant");
+		EmitLog(a, "Ctrl+Shift+F9: no resync possible here; it only works on the campaign map (not in the lobby, a battle or a loading screen)", 0);
+		a.Mark("k_err");
+		EmitBeep(a, 0x10);                                // MB_ICONHAND
+		a.J32("done", 0xE9);
 		a.Mark("up");
 		a.Raw(0xC7, 0x07, 0x00, 0x00, 0x00, 0x00);        // mov dword ptr [edi],0
 		a.Mark("done");
 		a.Raw(0x61);                                      // popad
 		a.Resolve();
+	}
+
+	// ---- event log (v1.13) -----------------------------------------------------------------------------
+	// eightplayer_log.txt in the game folder: one timestamped line whenever the multiplayer state changes (session,
+	// players, lobby state, campaign / battle environment, resync state, the "waiting for players" screen), every
+	// detected desync and every Ctrl+Shift+F9. Plain text, appended across game launches (cut back when over
+	// 256 KB at a launch), so a report after a hang or a restart still shows what led up to it.
+	// ModLog: esi = ASCII text, edx = value, ecx = 0 (no value) / 1 (decimal) / 2 (hex); keeps every register.
+	const uint GetLocalTimeIat = 0x115A1264;
+	const uint SetFilePointerIat = 0x115A12E0;
+	const uint LogStartedVa = 0x11CB1920;        // a line was written in this run
+	const uint WatchVa = 0x11CB1924;             // 16 watched values (+1; 0 = not logged yet)
+	const int WatchSlots = 16;
+	const uint BattleUiVa = 0x11BC8180;          // battle UI root: [+110h] = battle setup
+	public static uint modLogAt;
+
+	static void EmitModLog(Asm a) {
+		// decw: eax -> decimal at [edi] with at least ecx digits (zero padded); keeps ebx/edx/esi
+		uint decw = a.Here;
+		a.Raw(0x53, 0x52, 0x56, 0x8B, 0xF1, 0x33, 0xC9, 0xBB, 0x0A, 0x00, 0x00, 0x00);   // push ebx/edx/esi / esi = width / ecx = 0 / ebx = 10
+		a.Mark("ml_d");
+		a.Raw(0x33, 0xD2, 0xF7, 0xF3, 0x52, 0x41, 0x85, 0xC0); a.J8(0x75, "ml_d");   // xor edx,edx / div ebx / push edx / inc ecx / test eax,eax
+		a.Mark("ml_p");
+		a.Raw(0x3B, 0xCE); a.J8(0x73, "ml_w");            // cmp ecx,esi / jae
+		a.Raw(0x6A, 0x00, 0x41); a.J8(0xEB, "ml_p");      // push 0 / inc ecx
+		a.Mark("ml_w");
+		a.Raw(0x58, 0x04, 0x30, 0x88, 0x07, 0x47, 0x49); a.J8(0x75, "ml_w");   // pop eax / add al,'0' / stosb / dec ecx
+		a.Raw(0x5E, 0x5A, 0x5B, 0xC3);
+		// hex8: eax -> 8 hex digits at [edi]; keeps ecx/edx
+		uint hex8 = a.Here;
+		a.Raw(0x51, 0x52, 0xB9, 0x08, 0x00, 0x00, 0x00);
+		a.Mark("ml_hx");
+		a.Raw(0xC1, 0xC0, 0x04, 0x8B, 0xD0, 0x83, 0xE2, 0x0F, 0x80, 0xFA, 0x0A); a.J8(0x72, "ml_hd");
+		a.Raw(0x80, 0xC2, 0x07);
+		a.Mark("ml_hd");
+		a.Raw(0x80, 0xC2, 0x30, 0x88, 0x17, 0x47, 0x49); a.J8(0x75, "ml_hx");
+		a.Raw(0x5A, 0x59, 0xC3);
+		a.Resolve();
+
+		modLogAt = a.Here;
+		a.Raw(0x60);                                      // pushad
+		a.Raw(0x81, 0xEC, 0x40, 0x01, 0x00, 0x00);        // sub esp,140h: [0] SYSTEMTIME, [10h] written, [14h] file, [18h] format, [1Ch] value, [20h] text
+		a.Raw(0x89, 0x4C, 0x24, 0x18, 0x89, 0x54, 0x24, 0x1C);
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);
+		uint B = a.Here;
+		a.Raw(0x5B);                                      // pop ebx
+		a.Raw(0x54, 0xFF, 0x93); Imm(a, GetLocalTimeIat - B);   // push esp / call [GetLocalTime]
+		a.Raw(0x8D, 0x7C, 0x24, 0x20);                    // lea edi,[esp+20h]
+		foreach (var f in new[] { new { Off = (byte)0x08, Digits = (byte)2, Sep = (byte)':' }, new { Off = (byte)0x0A, Digits = (byte)2, Sep = (byte)':' },
+				new { Off = (byte)0x0C, Digits = (byte)2, Sep = (byte)'.' }, new { Off = (byte)0x0E, Digits = (byte)3, Sep = (byte)' ' } }) {
+			a.Raw(0x0F, 0xB7, 0x44, 0x24, f.Off, 0xB9, f.Digits, 0x00, 0x00, 0x00); a.Call(decw);   // movzx eax,word [esp+off] / mov ecx,digits
+			a.Raw(0xC6, 0x07, f.Sep, 0x47);               // mov byte [edi],sep / inc edi
+		}
+		a.Raw(0xC6, 0x07, 0x20, 0x47, 0x33, 0xC9);        // ' ' / xor ecx,ecx
+		a.Mark("ml_c");
+		a.Raw(0x8A, 0x06, 0x46, 0x84, 0xC0); a.J8(0x74, "ml_t");
+		a.Raw(0x88, 0x07, 0x47, 0x41, 0x81, 0xF9, 0xC8, 0x00, 0x00, 0x00); a.J8(0x72, "ml_c");   // at most 200 characters
+		a.Mark("ml_t");
+		a.Raw(0x83, 0x7C, 0x24, 0x18, 0x00); a.J8(0x74, "ml_eol");
+		a.Raw(0xC6, 0x07, 0x20, 0x47, 0x8B, 0x44, 0x24, 0x1C);   // ' ' / mov eax,[esp+1Ch]
+		a.Raw(0x83, 0x7C, 0x24, 0x18, 0x01); a.J8(0x75, "ml_hex");
+		a.Raw(0x33, 0xC9); a.Call(decw); a.J8(0xEB, "ml_eol");
+		a.Mark("ml_hex");
+		a.Call(hex8);
+		a.Mark("ml_eol");
+		a.Raw(0x66, 0xC7, 0x07, 0x0D, 0x0A, 0x83, 0xC7, 0x02);   // CR LF
+		Action<byte> open = disposition => {
+			a.Raw(0x6A, 0x00, 0x68, 0x80, 0x00, 0x00, 0x00, 0x6A, disposition, 0x6A, 0x00, 0x6A, 0x03, 0x68, 0x00, 0x00, 0x00, 0x40);
+			int fileIdx = a.Bytes.Count + 2;
+			a.Raw(0x8D, 0x83, 0, 0, 0, 0, 0x50, 0xFF, 0x93); Imm(a, CreateFileAIat - B);
+			fixFile.Add(fileIdx);
+			a.Raw(0x83, 0xF8, 0xFF); a.J32("ml_done", 0x0F, 0x84);
+			a.Raw(0x89, 0x44, 0x24, 0x14);                // mov [esp+14h],eax
+		};
+		fixFile.Clear();
+		open(4);                                          // OPEN_ALWAYS, GENERIC_WRITE
+		a.Raw(0x6A, 0x02, 0x6A, 0x00, 0x6A, 0x00, 0x50, 0xFF, 0x93); Imm(a, SetFilePointerIat - B);   // to the end: eax = size
+		a.Raw(0x83, 0xBB); Imm(a, LogStartedVa - B); a.Raw(0x00); a.J32("ml_line", 0x0F, 0x85);
+		a.Raw(0xC7, 0x83); Imm(a, LogStartedVa - B); Imm(a, 1);
+		a.Raw(0x3D, 0x00, 0x00, 0x04, 0x00); a.J8(0x72, "ml_head");   // over 256 KB: start the file again
+		a.Raw(0xFF, 0x74, 0x24, 0x14, 0xFF, 0x93); Imm(a, CloseHandleIat - B);
+		open(2);                                          // CREATE_ALWAYS
+		a.Mark("ml_head");
+		string head = "\r\n=== Shogun 2 8-player co-op mod v" + Version + ": game started ===\r\n";
+		a.Raw(0x6A, 0x00, 0x8D, 0x44, 0x24, 0x14, 0x50, 0x68); Imm(a, (uint)head.Length);   // push 0 / &written / length
+		int headLea = a.Bytes.Count + 2;
+		a.Raw(0x8D, 0x83, 0, 0, 0, 0, 0x50, 0xFF, 0x74, 0x24, 0x24, 0xFF, 0x93); Imm(a, WriteFileIat - B);
+		a.Mark("ml_line");
+		a.Raw(0x8D, 0x44, 0x24, 0x20, 0x8B, 0xCF, 0x2B, 0xC8);   // lea eax,[esp+20h] / mov ecx,edi / sub ecx,eax (length)
+		a.Raw(0x6A, 0x00, 0x8D, 0x54, 0x24, 0x14, 0x52, 0x51);   // push 0 / &written / length
+		a.Raw(0x8D, 0x44, 0x24, 0x2C, 0x50, 0xFF, 0x74, 0x24, 0x24, 0xFF, 0x93); Imm(a, WriteFileIat - B);
+		a.Raw(0xFF, 0x74, 0x24, 0x14, 0xFF, 0x93); Imm(a, CloseHandleIat - B);
+		a.Mark("ml_done");
+		a.Raw(0x81, 0xC4, 0x40, 0x01, 0x00, 0x00, 0x61, 0xC3);   // add esp,140h / popad / ret
+		uint file = a.Here;
+		a.Bytes.AddRange(Encoding.ASCII.GetBytes("eightplayer_log.txt")); a.Raw(0);
+		uint headAt = a.Here;
+		a.Bytes.AddRange(Encoding.ASCII.GetBytes(head)); a.Raw(0);
+		foreach (int i in fixFile) FixImm32(a, i, file - B);
+		FixImm32(a, headLea, headAt - B);
+		a.Resolve();
+	}
+	static readonly List<int> fixFile = new List<int>();
+
+	// one log line; the value to print is in eax (format 0 = none, 1 = decimal, 2 = hex); keeps every register
+	static void EmitLog(Asm a, string text, int format) {
+		a.Raw(0x60, 0x8B, 0xD0);                          // pushad / mov edx,eax
+		a.Raw(0xE8); Imm(a, (uint)text.Length + 1);       // call over the text: pushes its address
+		a.Bytes.AddRange(Encoding.ASCII.GetBytes(text)); a.Raw(0);
+		a.Raw(0x5E, 0xB9); Imm(a, (uint)format);          // pop esi / mov ecx,format
+		a.Call(modLogAt);
+		a.Raw(0x61);                                      // popad
+	}
+
+	// MessageBeep(type) through user32 (already loaded by the game); keeps every register
+	static void EmitBeep(Asm a, byte type) {
+		a.Raw(0x60, 0xE8, 0x00, 0x00, 0x00, 0x00);
+		uint B = a.Here;
+		a.Raw(0x5B);                                      // pop ebx
+		a.Raw(0xE8); Imm(a, 11); a.Bytes.AddRange(Encoding.ASCII.GetBytes("user32.dll")); a.Raw(0);   // push "user32.dll"
+		a.Raw(0xFF, 0x93); Imm(a, LoadLibraryAIat - B);
+		a.Raw(0x85, 0xC0, 0x74, 0x20);                    // test eax,eax / jz end (17 + 7 + 4 + 4 bytes on)
+		a.Raw(0xE8); Imm(a, 12); a.Bytes.AddRange(Encoding.ASCII.GetBytes("MessageBeep")); a.Raw(0);   // push "MessageBeep"
+		a.Raw(0x50, 0xFF, 0x93); Imm(a, GetProcAddressIat - B);
+		a.Raw(0x85, 0xC0, 0x74, 0x04, 0x6A, type, 0xFF, 0xD0);   // test / jz end / push type / call eax
+		a.Raw(0x61);                                      // end: popad
+	}
+
+	// every frame (frame hook, [ebp+58h] = session): log each watched value when it changes
+	static void EmitStateWatch(Asm a) {
+		a.Raw(0x60, 0xE8, 0x00, 0x00, 0x00, 0x00);
+		uint B = a.Here;
+		a.Raw(0x5B);                                      // pop ebx
+		int slot = 0;
+		Action<string> watch = text => {                  // eax = current value
+			string next = "sw_" + slot;
+			a.Raw(0x8D, 0x48, 0x01, 0x3B, 0x8B); Imm(a, WatchVa + (uint)slot * 4 - B);   // lea ecx,[eax+1] / cmp ecx,[slot]
+			a.J32(next, 0x0F, 0x84);
+			a.Raw(0x89, 0x8B); Imm(a, WatchVa + (uint)slot * 4 - B);
+			EmitLog(a, text, 1);
+			a.Mark(next);
+			slot++;
+		};
+		a.Raw(0x8B, 0x7D, 0x58, 0x33, 0xC0, 0x85, 0xFF, 0x0F, 0x95, 0xC0);   // mov edi,[ebp+58h] / eax = session != 0
+		watch("multiplayer session");
+		a.Raw(0x85, 0xFF); a.J32("sw_end", 0x0F, 0x84);
+		a.Raw(0x8B, 0xCF); a.Call(SessionIsHost); a.Raw(0x0F, 0xB6, 0xC0);
+		watch("this PC is the host");
+		a.Raw(0x8D, 0x8F, 0xF4, 0x8E, 0x05, 0x00); a.Call(CountPlayers);
+		watch("players");
+		a.Raw(0x33, 0xC0, 0x8B, 0x8F, 0xF0, 0x96, 0x05, 0x00, 0x85, 0xC9); a.J8(0x74, "sw_ls");
+		a.Call(MpLobbyState);
+		a.Mark("sw_ls");
+		watch("game state (3 = game running)");
+		a.Raw(0x33, 0xC0, 0x83, 0xBF, 0xD8, 0x96, 0x05, 0x00, 0x00, 0x0F, 0x95, 0xC0);
+		watch("campaign environment");
+		a.Raw(0x33, 0xC0, 0x83, 0xBF, 0xD0, 0x96, 0x05, 0x00, 0x00, 0x0F, 0x95, 0xC0);
+		watch("battle environment (battle loading or running)");
+		a.Raw(0x33, 0xC0, 0x8B, 0x8F, 0x78, 0xBE, 0x02, 0x00, 0x85, 0xC9); a.J8(0x74, "sw_rs");
+		a.Raw(0x8B, 0x41, 0x30);
+		a.Mark("sw_rs");
+		watch("resync state (0 idle, 1 pending, 2/3 accepted, 4 sending, 6-11 transfer/load)");
+		a.Raw(0x0F, 0xB6, 0x87, 0x85, 0x97, 0x05, 0x00);
+		watch("battle over: leaving the battle in 10 s");
+		a.Raw(0x33, 0xC0, 0x8B, 0x8B); Imm(a, CampaignUiVa - B);
+		a.Raw(0x85, 0xC9, 0x74, 0x11, 0x8B, 0x89, 0x98, 0x0A, 0x00, 0x00, 0x85, 0xC9, 0x74, 0x07, 0x83, 0x79, 0x70, 0x00, 0x0F, 0x95, 0xC0);
+		watch("campaign map shown");
+		a.Raw(0x33, 0xC0, 0x8B, 0x8B); Imm(a, BattleUiVa - B);
+		a.Raw(0x85, 0xC9, 0x74, 0x0A, 0x83, 0xB9, 0x10, 0x01, 0x00, 0x00, 0x00, 0x0F, 0x95, 0xC0);
+		watch("battle shown");
+		a.Raw(0x8B, 0x83); Imm(a, ResyncPendingVa - B);
+		watch("resync waiting to start");
+		a.Raw(0x8B, 0x83); Imm(a, ResyncAcceptsVa - B);
+		watch("resync: players ready (host)");
+		a.Mark("sw_end");
+		a.Raw(0x61);
+		a.Resolve();
+		if (slot > WatchSlots) throw new Exception("too many watched values");
+	}
+
+	// The campaign map shows "waiting for players" (with the time left) while every PC loads a battle; it is opened
+	// and closed by two listener functions (vtable slots at 1171534C / 11715358). Their slots now point at stubs
+	// that log, then go on to the original function. The slots are covered by base relocations, which move the
+	// stub addresses exactly as they moved the originals.
+	const uint WaitingShowSlot = 0x1171534C;     // -> 11153FA0: MultiplayerSetWaitingForLoad(true)
+	const uint WaitingHideSlot = 0x11715358;     // -> 11153F50: MultiplayerSetWaitingForLoad(false)
+
+	static uint EmitWaitingLog(Asm a, uint original, string text) {
+		uint at = a.Here;
+		EmitLog(a, text, 0);
+		a.Jmp(original);
+		return at;
+	}
+
+	static void RedirectSlot(uint slot, uint expected, uint target) {
+		int o = VaToOff(slot);
+		if (BitConverter.ToUInt32(b, o) != expected) throw new Exception(string.Format("unexpected pointer at {0:X8}", slot));
+		Array.Copy(BitConverter.GetBytes(target), 0, b, o, 4);
 	}
 
 	// ---- battle "gift units" with more than one spectator ---------------------------------------------
@@ -2143,6 +2470,7 @@ public static class EightPlayerPatcher {
 
 		// --- engine fixes in the new section ----------------------------------------------------------
 		var s = new Asm { Va = NewSectionVa() };
+		EmitModLog(s);                                    // first: every later stub may log
 		uint allyAt = EmitAllyResultFix(s);
 		ExpectBytes(AllyHookAt, 0x33, 0xC0, 0x38, 0x44, 0x24, 0x1C, 0x0F, 0x94, 0xC0, 0x89, 0x43, 0x04);
 		PutJmp(AllyHookAt, allyAt, 12);
@@ -2224,6 +2552,23 @@ public static class EightPlayerPatcher {
 		ReserveDataDword(ReconcileEnvVa); ReserveDataDword(ReconcileWaitVa);
 		ReserveDataDword(ResyncAcceptsVa); ReserveDataDword(ResyncWaitVa);
 		ReserveDataDword(PhantomVa + 0xFC);                     // the stand-in member entry
+		uint aiPlayedAt = EmitAiPlayedCheck(s);
+		ExpectBytes(AiPlayedCheck, 0x83, 0x79, 0x08, 0x02, 0x75, 0x12);
+		PutJmp(AiPlayedCheck, aiPlayedAt, 6);
+		uint chooserAt = EmitAiChooserTest(s, aiPlayedAt);
+		uint npEntryAt = EmitNonParticipantEntry(s);
+		ExpectBytes(NonParticipantEntry, 0x83, 0xEC, 0x0C, 0x56, 0x57);
+		PutJmp(NonParticipantEntry, npEntryAt, 5);
+		uint npAiAt = EmitNonParticipantAiCall(s, chooserAt);
+		foreach (uint c in NonParticipantAiCalls) RedirectCall(c, AiPlayedCheck, npAiAt);
+		RedirectCall(SideOfClanAiCall, AiPlayedCheck, EmitSideOfClanAiCall(s, chooserAt));
+		ExpectBytes(AiArmyHumansJump - 3, 0x83, 0xFB, 0x02, 0x75, 0x23);
+		b[VaToOff(AiArmyHumansJump)] = 0x72;
+		ReserveDataDword(AskingClanVa);
+		RedirectSlot(WaitingShowSlot, 0x11153FA0, EmitWaitingLog(s, 0x11153FA0, "campaign map: 'waiting for players' screen opened (every PC loads the battle)"));
+		RedirectSlot(WaitingHideSlot, 0x11153F50, EmitWaitingLog(s, 0x11153F50, "campaign map: 'waiting for players' screen closed"));
+		ReserveDataDword(LogStartedVa);
+		ReserveDataDword(WatchVa + (WatchSlots - 1) * 4);
 		AddSection(".s2mp", s.Bytes);
 
 		File.WriteAllBytes(outPath, b);
