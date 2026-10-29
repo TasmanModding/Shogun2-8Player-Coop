@@ -465,7 +465,7 @@ public static class EightPlayerPatcher {
 	const uint GetCurrentThreadIdIat = 0x115A11F4;
 	const uint CrashPrevFilterVa = 0x11CB1538;   // previous filter (third reserved .data dword)
 	const uint CrashInstalledVa = 0x11CB153C;    // filter installed (fourth)
-	public const string Version = "1.13";
+	public const string Version = "1.14";
 	static uint crashFilterAt;
 
 	// ---- engine error log ------------------------------------------------------------------------------
@@ -1061,8 +1061,17 @@ public static class EightPlayerPatcher {
 
 	static uint EmitAiPlayedCheck(Asm a) {
 		// ecx = choice list -> al = some human chose "play as AI" (4) and one fights (1); keeps all but eax
+		// v1.14: exactly 2 entries -> the original test, unchanged (entry 0 fights, entry 1 plays the AI). A tester
+		// pair desynced after "Play as AI" on v1.13, so 2-player games now behave exactly as in the unmodded game.
 		uint at = a.Here;
 		a.Raw(0x52, 0x51);                                // push edx / push ecx
+		a.Raw(0x83, 0x79, 0x08, 0x02); a.J8(0x75, "ap_many");   // cmp dword [ecx+8],2
+		a.Raw(0x8B, 0x49, 0x0C, 0x33, 0xC0);              // mov ecx,[ecx+0Ch] / xor eax,eax
+		a.Raw(0x83, 0x79, 0x2C, 0x04); a.J8(0x75, "ap_two");    // entry 1 plays the AI
+		a.Raw(0x83, 0x79, 0x0C, 0x01, 0x0F, 0x94, 0xC0);  // entry 0 fights: sete al
+		a.Mark("ap_two");
+		a.Raw(0x59, 0x5A, 0xC3);
+		a.Mark("ap_many");
 		a.Raw(0x33, 0xD2);                                // dl = seen 4, dh = seen 1
 		a.Raw(0x8B, 0x41, 0x08, 0x83, 0xF8, 0x02); a.J8(0x72, "ap_out");   // fewer than 2 entries
 		a.Raw(0x8B, 0x49, 0x0C);                          // mov ecx,[ecx+0Ch]
@@ -1089,6 +1098,9 @@ public static class EightPlayerPatcher {
 		a.Raw(0x84, 0xC0); a.J8(0x75, "ac_who");
 		a.Raw(0xC3);
 		a.Mark("ac_who");
+		a.Raw(0x83, 0x79, 0x08, 0x02); a.J8(0x77, "ac_many");   // 2 entries: as the original, any clan asking (al = 1)
+		a.Raw(0xC3);
+		a.Mark("ac_many");
 		a.Raw(0x53, 0x56, 0x57, 0x51);                    // push ebx/esi/edi/ecx
 		a.Raw(0x8B, 0xFA);                                // mov edi,edx       (clan)
 		a.Raw(0x8B, 0x59, 0x08, 0x8B, 0x71, 0x0C);        // ebx = count / esi = entries
@@ -1121,14 +1133,28 @@ public static class EightPlayerPatcher {
 	}
 
 	// replaces "call FUN_105cbb50" in FUN_105cefa0 (clan saved at its entry)
-	static uint EmitNonParticipantAiCall(Asm a, uint chooser) {
+	// v1.14: logs this PC's battle role whenever it changes: entries x100 + "someone plays the AI" x10 + "this PC
+	// plays the AI army". Every PC in the battle should log the same first two digits.
+	const uint AiRoleLastVa = 0x11CB1974;
+
+	static uint EmitNonParticipantAiCall(Asm a, uint chooser, uint aiPlayed) {
 		uint at = a.Here;
 		a.Raw(0x52);                                      // push edx
 		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);
 		uint B = a.Here;
 		a.Raw(0x5A, 0x8B, 0x92); Imm(a, AskingClanVa - B);   // pop edx / mov edx,[edx+clan]
 		a.Call(chooser);
-		a.Raw(0x5A, 0xC3);                                // pop edx / ret
+		a.Raw(0x60, 0x0F, 0xB6, 0xF0);                    // pushad / movzx esi,al   (this PC plays the AI)
+		a.Call(aiPlayed);
+		a.Raw(0x0F, 0xB6, 0xC0, 0x6B, 0xC0, 0x0A, 0x03, 0xF0);   // movzx eax,al / imul eax,eax,10 / add esi,eax
+		a.Raw(0x6B, 0x41, 0x08, 0x64, 0x03, 0xC6);        // imul eax,[ecx+8],100 / add eax,esi
+		a.Raw(0x8D, 0x50, 0x01, 0xE8, 0x00, 0x00, 0x00, 0x00);   // lea edx,[eax+1] / call $+5
+		uint B2 = a.Here;
+		a.Raw(0x5B, 0x3B, 0x93); Imm(a, AiRoleLastVa - B2); a.J32("np_same", 0x0F, 0x84);
+		a.Raw(0x89, 0x93); Imm(a, AiRoleLastVa - B2);
+		EmitLog(a, "battle role check (battle choices x100 + someone plays the AI army x10 + this PC plays it)", 1);
+		a.Mark("np_same");
+		a.Raw(0x61, 0x5A, 0xC3);                          // popad / pop edx / ret
 		a.Resolve();
 		return at;
 	}
@@ -1411,10 +1437,20 @@ public static class EightPlayerPatcher {
 		a.Resolve();
 	}
 
+	// v1.14: the per-frame work moved. Up to v1.13 it hung off the call at 100B190C, which turned out to run only
+	// in one app mode (a vtable slot near the battle/season tables), not on the campaign map or in the lobby: the
+	// v1.13 event logs from the campaign have no state lines at all. So Ctrl+Shift+F9, the automatic resync,
+	// the host's wait for every player and the missing-player AI handover never ran where they were needed.
+	// Now it runs at the entry of FUN_10ef9a20, the session's desync-report check, which both session updates
+	// (FUN_10f03e80 and the running game's FUN_10f2cb00) call every update, with ecx = session.
+	const uint SessionCheckAt = 0x10EF9A20;     // sub esp,34h / push ebx / mov ebx,ecx (6 bytes)
+	const uint SessionCheckResume = 0x10EF9A26;
+
 	static uint EmitFramePin(Asm a) {
-		// replaces "call FUN_10f36680" (ecx = its this): pin, then tail-call the original
 		EmitCrashFilter(a);
 		uint at = a.Here;
+		// the blocks below read the session from [ebp+58h], as at the old site: build that frame
+		a.Raw(0x55, 0x83, 0xEC, 0x5C, 0x89, 0x4C, 0x24, 0x58, 0x8B, 0xEC);   // push ebp / sub esp,5Ch / mov [esp+58h],ecx / mov ebp,esp
 		EmitCrashFilterInstall(a);
 		EmitStateWatch(a);
 		EmitResyncKeyPoll(a);
@@ -1422,7 +1458,9 @@ public static class EightPlayerPatcher {
 		EmitResyncWait(a);
 		EmitReserveReconcile(a, reservedTestAt);
 		EmitPinFloatModes(a);
-		a.Jmp(MultiplayerUpdate);
+		a.Raw(0x8B, 0x4C, 0x24, 0x58, 0x83, 0xC4, 0x5C, 0x5D);   // mov ecx,[esp+58h] / add esp,5Ch / pop ebp
+		a.Raw(0x83, 0xEC, 0x34, 0x53, 0x8B, 0xD9);        // sub esp,34h / push ebx / mov ebx,ecx   (replaced)
+		a.Jmp(SessionCheckResume);
 		return at;
 	}
 
@@ -1457,12 +1495,11 @@ public static class EightPlayerPatcher {
 	// "resync pending" flag is set; the frame hook (EmitPendingResync) starts the resync as soon as the game is
 	// back on the campaign map and tells every PC to join (as Ctrl+Shift+F9). Custom battles keep the original rules.
 	const uint ResyncPendingVa = 0x11CB1540;     // fifth reserved .data dword
+	const uint PendingWhyLastVa = 0x11CB1978;    // v1.14: last logged reason (+1) a pending resync couldn't start
 
 	static uint EmitBattleNoKick(Asm a) {
 		uint at = a.Here;
-		a.Raw(0x50, 0x33, 0xC0, 0x83, 0xBF, 0xCC, 0x96, 0x05, 0x00, 0x00, 0x0F, 0x95, 0xC0);   // push eax / eax = battle running
-		EmitLog(a, "DESYNC detected on this PC (1 = during a battle, 0 = on the campaign map)", 1);
-		a.Raw(0x58);                                      // pop eax
+		EmitRateLog(a, "DESYNC detected on this PC; detections since the last such line:", DesyncLocalLastVa, DesyncLocalCountVa, "dl");
 		a.Raw(0x83, 0xBF, 0xD4, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [edi+596D4h],0   (campaign?  edi = session+4)
 		a.J8(0x75, "campaign");
 		a.Raw(0x83, 0xBF, 0xCC, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [edi+596CCh],0   (battle running?)
@@ -1488,13 +1525,24 @@ public static class EightPlayerPatcher {
 		uint B = a.Here;
 		a.Raw(0x5B);                                      // pop ebx
 		a.Raw(0x83, 0xBB); Imm(a, ResyncPendingVa - B); a.Raw(0x00);   // cmp dword [pending],0
-		a.J8(0x74, "done");
-		a.Raw(0x8B, 0x4D, 0x58, 0x85, 0xC9); a.J8(0x74, "done");       // mov ecx,[ebp+58h] / test ecx,ecx (session)
+		a.J32("done", 0x0F, 0x84);
+		a.Raw(0x8B, 0x4D, 0x58, 0x85, 0xC9); a.J32("clear", 0x0F, 0x84); // mov ecx,[ebp+58h] / test ecx,ecx (session)
+		a.Raw(0x83, 0xB9, 0xD8, 0x96, 0x05, 0x00, 0x00); a.J32("done", 0x0F, 0x84);    // no campaign (lobby; switching from a battle): wait
+		a.Raw(0x83, 0xB9, 0xD0, 0x96, 0x05, 0x00, 0x00); a.J32("done", 0x0F, 0x85);    // battle running: wait for the map
 		a.Raw(0x8B, 0xB1, 0x78, 0xBE, 0x02, 0x00);        // mov esi,[ecx+2BE78h]    (resync state)
-		a.Raw(0x85, 0xF6); a.J8(0x74, "done");
-		a.Raw(0x83, 0x7E, 0x30, 0x00); a.J8(0x75, "clear");             // a resync is already running
+		a.Raw(0x85, 0xF6); a.J32("done", 0x0F, 0x84);
+		a.Raw(0x83, 0x7E, 0x30, 0x00); a.J32("clear", 0x0F, 0x85);      // a resync is already running
 		a.Raw(0x51, 0x8B, 0xCE); a.Call(StartResync);     // push session / ecx = resync
-		a.Raw(0x83, 0x7E, 0x30, 0x00); a.J8(0x74, "done");             // not on the campaign map yet: retry next frame
+		a.Raw(0x83, 0x7E, 0x30, 0x00); a.J32("pr_go", 0x0F, 0x85);     // started
+		// not possible yet (retried every frame): log the reason whenever it changes
+		a.Raw(0x8B, 0x4D, 0x58); a.Call(resyncWhyAt);
+		a.Raw(0x8D, 0x50, 0x01, 0x3B, 0x93); Imm(a, PendingWhyLastVa - B); a.J32("done", 0x0F, 0x84);
+		a.Raw(0x89, 0x93); Imm(a, PendingWhyLastVa - B);
+		EmitLog(a, "automatic resync waiting; why: game state x10 + busy flag (30 = could start; 31 = busy)", 1);
+		a.J32("done", 0xE9);
+		a.Mark("pr_go");
+		a.Raw(0xC7, 0x83); Imm(a, PendingWhyLastVa - B); Imm(a, 0);
+		EmitLog(a, "automatic resync started", 0);
 		a.Raw(0x8B, 0x4D, 0x58, 0x6A, 0x02); a.Call(SendResyncAnswer); // everyone joins
 		a.Mark("clear");
 		a.Raw(0xC7, 0x83); Imm(a, ResyncPendingVa - B); Imm(a, 0);     // mov dword [pending],0
@@ -1503,11 +1551,18 @@ public static class EightPlayerPatcher {
 		a.Resolve();
 	}
 
+	// This point is reached after EVERY sync check (about 3 times a second, even alone in a lobby), not only after a
+	// desync: the kick loop then walks the check's "out of sync with host" list, which is usually empty. v1.13 and
+	// v1.14 logged every check as a desync. The result is [[net+6Ch]+1AE0h]: counts at +8h (in sync), +14h (out of
+	// sync, the list kicked here and printed as "OO SYNC WITH HOST" in mp_*_desync.txt), +20h (checksums missing).
+	const int SyncOutOfSyncCount = 0x1AF4;
+
 	static uint EmitReportNoKick(Asm a) {
 		uint at = a.Here;
-		a.Raw(0x50, 0x33, 0xC0, 0x83, 0xBB, 0xD0, 0x96, 0x05, 0x00, 0x00, 0x0F, 0x95, 0xC0);   // push eax / eax = battle running
-		EmitLog(a, "DESYNC reported by another player (1 = during a battle, 0 = on the campaign map)", 1);
-		a.Raw(0x58);                                      // pop eax
+		a.Raw(0x8B, 0x46, 0x6C, 0x85, 0xC0); a.J32("rn_nolog", 0x0F, 0x84);   // mov eax,[esi+6Ch] (esi = network) / test
+		a.Raw(0x83, 0xB8); Imm(a, (uint)SyncOutOfSyncCount); a.Raw(0x00); a.J32("rn_nolog", 0x0F, 0x84);   // cmp [eax+1AF4h],0
+		EmitRateLog(a, "DESYNC: sync check found players out of sync with the host; checks since the last such line:", DesyncReportLastVa, DesyncReportCountVa, "dr");
+		a.Mark("rn_nolog");
 		a.Raw(0x83, 0xBB, 0xD8, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [ebx+596D8h],0   (campaign)
 		a.J32("skip", 0x0F, 0x85);                        // jne -> no kick
 		a.Raw(0x83, 0xBB, 0xD0, 0x96, 0x05, 0x00, 0x00);  // cmp dword ptr [ebx+596D0h],0
@@ -1793,6 +1848,9 @@ public static class EightPlayerPatcher {
 		a.Raw(0x84, 0xC0);                                // test al,al
 		a.J32("k_nothost", 0x0F, 0x84);
 		a.Raw(0x8B, 0x4D, 0x58);                          // mov ecx,[ebp+58h]
+		// v1.14: FUN_10f058d0 only asks for game state 3, which the lobby has too: a campaign must be loaded and no battle
+		a.Raw(0x83, 0xB9, 0xD8, 0x96, 0x05, 0x00, 0x00); a.J32("k_cant", 0x0F, 0x84);   // cmp [ecx+596D8h],0 (campaign)
+		a.Raw(0x83, 0xB9, 0xD0, 0x96, 0x05, 0x00, 0x00); a.J32("k_cant", 0x0F, 0x85);   // cmp [ecx+596D0h],0 (battle)
 		a.Raw(0x8B, 0x81, 0x78, 0xBE, 0x02, 0x00);        // mov eax,[ecx+2BE78h]    (resync state)
 		a.Raw(0x85, 0xC0);                                // test eax,eax
 		a.J32("k_cant", 0x0F, 0x84);
@@ -1825,6 +1883,8 @@ public static class EightPlayerPatcher {
 		a.J32("k_err", 0xE9);
 		a.Mark("k_cant");
 		EmitLog(a, "Ctrl+Shift+F9: no resync possible here; it only works on the campaign map (not in the lobby, a battle or a loading screen)", 0);
+		a.Raw(0x8B, 0x4D, 0x58); a.Call(resyncWhyAt);     // mov ecx,[ebp+58h]
+		EmitLog(a, "  why: game state x10 + busy flag (30 = could start; 31 = busy, e.g. a turn, battle or popup in progress; 990 = no game)", 1);
 		a.Mark("k_err");
 		EmitBeep(a, 0x10);                                // MB_ICONHAND
 		a.J32("done", 0xE9);
@@ -1848,6 +1908,7 @@ public static class EightPlayerPatcher {
 	const int WatchSlots = 16;
 	const uint BattleUiVa = 0x11BC8180;          // battle UI root: [+110h] = battle setup
 	public static uint modLogAt;
+	public static uint AiPlayedCheckAt;   // where the play-as-AI check landed (tests)
 
 	static void EmitModLog(Asm a) {
 		// decw: eax -> decimal at [edi] with at least ecx digits (zero padded); keeps ebx/edx/esi
@@ -1937,6 +1998,49 @@ public static class EightPlayerPatcher {
 	}
 	static readonly List<int> fixFile = new List<int>();
 
+	// v1.14: a desync is reported again with every checksum (about 3 times a second) until it is resolved; one
+	// v1.13 log grew to 38,000 copies of the same line. Now at most one line every 10 s, with the count since
+	// the last line. [last] = GetTickCount of the last line (0 = none yet), [count] = reports since then.
+	const uint GetTickCountIat = 0x115A1274;
+	const uint DesyncLocalLastVa = 0x11CB1964, DesyncLocalCountVa = 0x11CB1968;
+	const uint DesyncReportLastVa = 0x11CB196C, DesyncReportCountVa = 0x11CB1970;
+
+	static void EmitRateLog(Asm a, string text, uint lastVa, uint countVa, string tag) {
+		a.Raw(0x60, 0xE8, 0x00, 0x00, 0x00, 0x00);
+		uint B = a.Here;
+		a.Raw(0x5B, 0xFF, 0x83); Imm(a, countVa - B);    // pop ebx / inc dword [count]
+		a.Raw(0xFF, 0x93); Imm(a, GetTickCountIat - B);   // eax = now
+		a.Raw(0x83, 0xBB); Imm(a, lastVa - B); a.Raw(0x00); a.J8(0x74, tag + "_log");   // first one: log
+		a.Raw(0x8B, 0xC8, 0x2B, 0x8B); Imm(a, lastVa - B);   // mov ecx,eax / sub ecx,[last]
+		a.Raw(0x81, 0xF9, 0x10, 0x27, 0x00, 0x00); a.J32(tag + "_skip", 0x0F, 0x82);   // under 10 s
+		a.Mark(tag + "_log");
+		a.Raw(0x0D, 0x01, 0x00, 0x00, 0x00, 0x89, 0x83); Imm(a, lastVa - B);   // or eax,1 (never 0) / mov [last],eax
+		a.Raw(0x8B, 0x83); Imm(a, countVa - B);           // mov eax,[count]
+		a.Raw(0xC7, 0x83); Imm(a, countVa - B); Imm(a, 0);
+		EmitLog(a, text, 1);
+		a.Mark(tag + "_skip");
+		a.Raw(0x61);                                      // (the calling emitter resolves the jumps)
+	}
+
+	// eax = why no resync can start: game state x10 + the session's "busy" flag (vfunc 84h of the object at
+	// session+8, asked by FUN_10f058d0 only in game state 3). 31 = running but busy, 30 = could start,
+	// 990 = no game state object. ecx = session; keeps ebx/esi/edi/ebp.
+	static uint resyncWhyAt;
+	static void EmitResyncWhy(Asm a) {
+		resyncWhyAt = a.Here;
+		a.Raw(0x56, 0x57, 0x8B, 0xF9);                    // push esi / push edi / mov edi,ecx
+		a.Raw(0xB8, 0xDE, 0x03, 0x00, 0x00);              // mov eax,990
+		a.Raw(0x8B, 0x8F, 0xF0, 0x96, 0x05, 0x00, 0x85, 0xC9); a.J8(0x74, "rw_end");
+		a.Call(MpLobbyState);
+		a.Raw(0x6B, 0xF0, 0x0A);                          // imul esi,eax,10
+		a.Raw(0x83, 0xF8, 0x03, 0x8B, 0xC6); a.J8(0x75, "rw_end");   // cmp eax,3 / mov eax,esi
+		a.Raw(0x8D, 0x4F, 0x08, 0x8B, 0x01, 0xFF, 0x90, 0x84, 0x00, 0x00, 0x00);   // lea ecx,[edi+8] / call [[ecx]+84h]
+		a.Raw(0x0F, 0xB6, 0xC0, 0x03, 0xC6);              // movzx eax,al / add eax,esi
+		a.Mark("rw_end");
+		a.Raw(0x5F, 0x5E, 0xC3);
+		a.Resolve();
+	}
+
 	// one log line; the value to print is in eax (format 0 = none, 1 = decimal, 2 = hex); keeps every register
 	static void EmitLog(Asm a, string text, int format) {
 		a.Raw(0x60, 0x8B, 0xD0);                          // pushad / mov edx,eax
@@ -1986,7 +2090,7 @@ public static class EightPlayerPatcher {
 		a.Raw(0x33, 0xC0, 0x8B, 0x8F, 0xF0, 0x96, 0x05, 0x00, 0x85, 0xC9); a.J8(0x74, "sw_ls");
 		a.Call(MpLobbyState);
 		a.Mark("sw_ls");
-		watch("game state (3 = game running)");
+		watch("game state (3 = connected: lobby or game)");
 		a.Raw(0x33, 0xC0, 0x83, 0xBF, 0xD8, 0x96, 0x05, 0x00, 0x00, 0x0F, 0x95, 0xC0);
 		watch("campaign environment");
 		a.Raw(0x33, 0xC0, 0x83, 0xBF, 0xD0, 0x96, 0x05, 0x00, 0x00, 0x0F, 0x95, 0xC0);
@@ -2007,6 +2111,11 @@ public static class EightPlayerPatcher {
 		watch("resync waiting to start");
 		a.Raw(0x8B, 0x83); Imm(a, ResyncAcceptsVa - B);
 		watch("resync: players ready (host)");
+		a.Raw(0x33, 0xC0, 0x8B, 0x8F, 0x50, 0xBE, 0x02, 0x00, 0x85, 0xC9); a.J8(0x74, "sw_os");   // network object
+		a.Raw(0x8B, 0x49, 0x6C, 0x85, 0xC9); a.J8(0x74, "sw_os");
+		a.Raw(0x8B, 0x81); Imm(a, (uint)SyncOutOfSyncCount);
+		a.Mark("sw_os");
+		watch("sync check: players out of sync with the host");
 		a.Mark("sw_end");
 		a.Raw(0x61);
 		a.Resolve();
@@ -2471,6 +2580,7 @@ public static class EightPlayerPatcher {
 		// --- engine fixes in the new section ----------------------------------------------------------
 		var s = new Asm { Va = NewSectionVa() };
 		EmitModLog(s);                                    // first: every later stub may log
+		EmitResyncWhy(s);
 		uint allyAt = EmitAllyResultFix(s);
 		ExpectBytes(AllyHookAt, 0x33, 0xC0, 0x38, 0x44, 0x24, 0x1C, 0x0F, 0x94, 0xC0, 0x89, 0x43, 0x04);
 		PutJmp(AllyHookAt, allyAt, 12);
@@ -2504,7 +2614,8 @@ public static class EightPlayerPatcher {
 		uint entryPlusAt = EmitMemberEntryPlus(s, reservedTestAt);
 		RedirectCall(MemberEntryCall, MemberEntry, entryPlusAt);
 		uint framePinAt = EmitFramePin(s);
-		RedirectCall(FrameUpdateCall, MultiplayerUpdate, framePinAt);
+		ExpectBytes(SessionCheckAt, 0x83, 0xEC, 0x34, 0x53, 0x8B, 0xD9);
+		PutJmp(SessionCheckAt, framePinAt, 6);
 		uint tickPinAt = EmitBattleTickPin(s);
 		ExpectBytes(BattleTickAt, 0xFF, 0x74, 0x24, 0x08, 0x8B, 0x4C, 0x24, 0x10);
 		PutJmp(BattleTickAt, tickPinAt, 8);
@@ -2552,14 +2663,14 @@ public static class EightPlayerPatcher {
 		ReserveDataDword(ReconcileEnvVa); ReserveDataDword(ReconcileWaitVa);
 		ReserveDataDword(ResyncAcceptsVa); ReserveDataDword(ResyncWaitVa);
 		ReserveDataDword(PhantomVa + 0xFC);                     // the stand-in member entry
-		uint aiPlayedAt = EmitAiPlayedCheck(s);
+		uint aiPlayedAt = EmitAiPlayedCheck(s); AiPlayedCheckAt = aiPlayedAt;
 		ExpectBytes(AiPlayedCheck, 0x83, 0x79, 0x08, 0x02, 0x75, 0x12);
 		PutJmp(AiPlayedCheck, aiPlayedAt, 6);
 		uint chooserAt = EmitAiChooserTest(s, aiPlayedAt);
 		uint npEntryAt = EmitNonParticipantEntry(s);
 		ExpectBytes(NonParticipantEntry, 0x83, 0xEC, 0x0C, 0x56, 0x57);
 		PutJmp(NonParticipantEntry, npEntryAt, 5);
-		uint npAiAt = EmitNonParticipantAiCall(s, chooserAt);
+		uint npAiAt = EmitNonParticipantAiCall(s, chooserAt, aiPlayedAt);
 		foreach (uint c in NonParticipantAiCalls) RedirectCall(c, AiPlayedCheck, npAiAt);
 		RedirectCall(SideOfClanAiCall, AiPlayedCheck, EmitSideOfClanAiCall(s, chooserAt));
 		ExpectBytes(AiArmyHumansJump - 3, 0x83, 0xFB, 0x02, 0x75, 0x23);
@@ -2569,6 +2680,7 @@ public static class EightPlayerPatcher {
 		RedirectSlot(WaitingHideSlot, 0x11153F50, EmitWaitingLog(s, 0x11153F50, "campaign map: 'waiting for players' screen closed"));
 		ReserveDataDword(LogStartedVa);
 		ReserveDataDword(WatchVa + (WatchSlots - 1) * 4);
+		ReserveDataDword(PendingWhyLastVa);              // also covers 11CB1964..1974 (rate limits, battle role)
 		AddSection(".s2mp", s.Bytes);
 
 		File.WriteAllBytes(outPath, b);

@@ -134,6 +134,39 @@ long campaigns; both players saving. No official root cause is known.
 - None of this mod's hooks run on that path (only the FP pin). The game's own Crash.dmp path (1000AFE0 -> 117C7950) is built but
   never used, hence the mod's crash reporter.
 
+## v1.14 findings (29 Oct 2026)
+- **The "frame hook" at 100B190C never ran on the campaign map or in the lobby.** 100B190C is inside FUN_100b1810,
+  slot 3 of the vtable at 115AAA9C (next to the season/"Land" tables), not the campaign or front-end update. Every
+  v1.13 log from a campaign had no state-watch lines, no Ctrl+Shift+F9 lines (no ding), and no resync ever started.
+  So everything hung off it since v1.9 (key, pending resync, host accept wait, missing-player reconcile, crash
+  filter install, FP pin per frame) did not work where it mattered.
+- Session updates: FUN_10f03e80 (fastcall session; returns early without [session+2BE50h]; calls the network pump
+  FUN_10f36680 and then FUN_10ef9a20) and FUN_10f2cb00 (running game, vtable slot 116D6C9C; also calls both).
+  FUN_10ef9a20 (fastcall session, the desync-report check) therefore runs every update in every mode. v1.14 moves
+  the per-frame block to its entry (10EF9A20, `sub esp,34h / push ebx / mov ebx,ecx`, 6 bytes); the block builds
+  a frame so the old [ebp+58h] = session reads still work.
+- FUN_10f058d0 (start resync) needs MpLobbyState == 3 and vfunc 84h of the object at session+8 returning 0; the
+  vtable at 116D6B1C is NOT that object's (its +78h is 10F24A10). v1.14 logs "game state x10 + busy flag".
+  MpLobbyState is already 3 in a hosted lobby (seen live, 1 player), and FUN_10f058d0 has no campaign test, so the
+  key and the pending resync now also need [session+596D8h] != 0 and [session+596D0h] == 0.
+- **FUN_10ef9a20 is the per-check kick loop, not a desync report.** It runs its body whenever the sync result
+  counter [[net+6Ch]+18DCh] changes (every sync check, ~3/s, even alone in a lobby: 33-34 per 10 s seen live) while
+  mp_desync_kick_enabled (117B7A91, parsed at 10F06AA3) is set and no resync runs. Result block
+  R = [[net+6Ch]+1AE0h] (FUN_10f32470 copies it): vectors (?, count, data) at +4h (IN SYNC, count +8h), +10h
+  (OO SYNC WITH HOST, count +14h = 1AF4h, 8-byte entries) and +1Ch (CHECKSUMS MISSING, count +20h); the desync
+  file writer FUN_10f3cad0 prints the same counts. The loop walks the OO SYNC list: host -> FUN_10f02c10(player, 2)
+  (kick message E8h), client -> FUN_10f033e0(3) for itself. v1.13 logged every check as "DESYNC reported by another
+  player", so those lines in tester logs mean nothing; v1.14 logs only when the OO SYNC count is non-zero, and
+  watches the count.
+- Play as AI: the original FUN_105cbb50 is `count == 2 && entry[1].choice == 4 && entry[0].choice == 1` (order
+  matters). v1.13 accepted either order and any count >= 2; v1.14 keeps the original for count == 2 and the
+  chooser test returns "yes" for any clan then (as the original), new logic only for 3+. CPU-tested.
+- Report from a tester: "it only breaks when someone chooses Play as AI" (2 players; the "desync reports every
+  0.3 s" in that log turned out to be routine sync checks, see below, so the log doesn't show a real desync).
+- Report (3) (host crashed loading the post-battle screen after a 2v1 battle) ran a pre-release v1.13 build (DLL
+  481702A6..., not a published hash) with no crash reporter on the map; its "battle desync" lines are routine checks.
+  Report (2) (camera stopped moving) likewise shows no real desync. Both need v1.14 logs from every player.
+
 ## Tester reports after v1.12 (26 Oct 2026), not solved yet
 - **Black screen "waiting for other players" (309 s left) when a battle loads** (2 players, large overhaul mods:
   Expanded Japan, MOSS/MUST and ~20 other packs; rebel army attacking a human city). Host's mp_battle_desync.txt:

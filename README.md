@@ -48,7 +48,7 @@ Everyone must also end up with the same two hashes, or they can't join each othe
 
 | File | SHA-256 |
 |---|---|
-| `empire.retail.dll` | `E2AFE95706AAE39B005A23A1046FBC8C1FEB09967883BE6892192BF1F92E2EBE` |
+| `empire.retail.dll` | `E2451F4A023EC7798FBAA38DC418279241747AFEAAE9439F5003CA9091F8CB5C` |
 | `data\eightplayer_coop.pack` | `983F63E02958AF253B911934680AEE736CED160B2BB9FC152023EBCF479853F5` |
 
 ## Before you play
@@ -108,6 +108,15 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 22. Host presses Ctrl+Shift+F9 on the campaign map: a "ding", and the resync runs. In the lobby: an error sound, nothing else.
 23. Everyone runs `Report.bat`: a text file appears on the Desktop with the MATCH CODE and the event log.
 
+## v1.14: Ctrl+Shift+F9 and automatic resync now actually run on the campaign map
+**Everyone update.** The v1.13 event logs you sent showed the real problem:
+- **The mod's every-frame code never ran on the campaign map or in the lobby.** It was attached to a spot in the game that only runs in one other mode. So since v1.9, **Ctrl+Shift+F9 did nothing** (no ding), the **automatic resync never started** after a desync, the host's "wait for every player" timer never ran, missing players' clans weren't handed to the AI, and the crash reporter wasn't active on the map. It now runs from the multiplayer session's own update, which runs on every screen.
+- **Play as AI with 2 players works exactly like the unmodded game again.** Several of you reported that games only broke after someone chose "Play as AI". With exactly 2 players the mod now uses the game's original rule unchanged; the 3+ player handling only applies with 3 or more.
+- **The "DESYNC reported by another player" lines in v1.13 logs were not desyncs.** The game checks sync about 3 times a second, even with one player alone in a lobby, and v1.13 wrote that line after every check. v1.14 logs a desync only when the check really finds a player out of sync (at most once every 10 seconds, with a count), and logs the number of out-of-sync players whenever it changes.
+- **Ctrl+Shift+F9 and the automatic resync only run with a campaign loaded and no battle running.** The game's own resync start doesn't check for this, and v1.14's code now runs in the lobby too.
+- **Event log:** when a resync can't start, the log says why; each PC logs its role in a battle (who plays the AI army), so a mismatch between PCs shows up.
+- **`Report.bat` is much more thorough:** it asks a few questions (host? how many players? Play as AI?), starts with an automatic summary of what went wrong, and adds the PC details that matter for desyncs (Windows number format, CPU, overlays such as Discord or MSI Afterburner), every game pack, the game's multiplayer settings and recent saves.
+
 ## v1.13: Play as AI, Ctrl+Shift+F9 feedback, one-file bug reports
 - **Play as AI works with 3+ players.** The game only understood "Play as AI" with exactly 2 players. With 3+ players the player who chose it never got the AI army (and in the unmodded game the game closed). Now the first player who chooses Play as AI controls the AI army, and everyone else watching follows the battle as usual.
 - **Ctrl+Shift+F9 tells you what it did:** a "ding" when the resync starts, an error sound when it can't (lobby, battle, loading screen, or a client pressed it). The reason goes into `eightplayer_log.txt`.
@@ -116,7 +125,7 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 - **Head-to-head explained** (see "Head-to-head vs co-op" above).
 
 **Being investigated, please report with `Report.bat`:**
-- Battles that never load (black screen, "waiting for other players"). The logs we have so far all come from games with large overhaul mods, where the battle went out of sync within its first second. v1.13's event log will show what each PC was doing.
+- Battles that never load (black screen, "waiting for other players") and crashes on the way back from a battle. Send every player's `Report.bat` file from v1.14.
 - With 3+ players: no weather choice before a battle, and no markers on the campaign map. Please tell us what you expected to see and where (screenshot from a 2-player game helps).
 - A player who leaves while a popup of theirs is open (diplomacy offer, bankruptcy) can block everyone after the AI takes their clan.
 
