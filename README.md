@@ -48,7 +48,7 @@ Everyone must also end up with the same two hashes, or they can't join each othe
 
 | File | SHA-256 |
 |---|---|
-| `empire.retail.dll` | `E2451F4A023EC7798FBAA38DC418279241747AFEAAE9439F5003CA9091F8CB5C` |
+| `empire.retail.dll` | `EF26E0EEBC101F2C5919FD3B9177C1C711DBB70DE2B39512AC25A50047C94F30` |
 | `data\eightplayer_coop.pack` | `983F63E02958AF253B911934680AEE736CED160B2BB9FC152023EBCF479853F5` |
 
 ## Before you play
@@ -108,6 +108,13 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 22. Host presses Ctrl+Shift+F9 on the campaign map: a "ding", and the resync runs. In the lobby: an error sound, nothing else.
 23. Everyone runs `Report.bat`: a text file appears on the Desktop with the MATCH CODE and the event log.
 
+## v1.15: crash fixes for players watching a battle
+**Everyone update.** Thanks for the v1.14 `Report.bat` files: the new crash reporter caught the crashes, so they could be traced.
+- **"Spectate battle" crashed the game with 3+ players** (e.g. 5-player co-op, an AI general attacking with a player assisting). To show a battle to someone not in it, the game looked up the side of *every* human and kept the answer for the last one, even when that player wasn't in the battle. With 2 players there was only one to check. Now a player outside the battle keeps the side already found, and if none is found they watch from the attacking side.
+- **The game closed when the host auto-resolved a battle** (4-player head-to-head) on PCs of players who weren't in it. Their results popup was queued for a battle that auto-resolve had already removed. The popup is now skipped when its battle is gone (the log says so).
+- **No more resync in the middle of a campaign battle.** On a desync during a battle the game started a resync right away, while everyone was still fighting. It now waits until everyone is back on the campaign map (as intended since v1.9).
+- **`Report.bat`** converts the crash address into the form needed to find the cause.
+
 ## v1.14: Ctrl+Shift+F9 and automatic resync now actually run on the campaign map
 **Everyone update.** The v1.13 event logs you sent showed the real problem:
 - **The mod's every-frame code never ran on the campaign map or in the lobby.** It was attached to a spot in the game that only runs in one other mode. So since v1.9, **Ctrl+Shift+F9 did nothing** (no ding), the **automatic resync never started** after a desync, the host's "wait for every player" timer never ran, missing players' clans weren't handed to the AI, and the crash reporter wasn't active on the map. It now runs from the multiplayer session's own update, which runs on every screen.
@@ -125,7 +132,7 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 - **Head-to-head explained** (see "Head-to-head vs co-op" above).
 
 **Being investigated, please report with `Report.bat`:**
-- Battles that never load (black screen, "waiting for other players") and crashes on the way back from a battle. Send every player's `Report.bat` file from v1.14.
+- Battles that never load (black screen, "waiting for other players"), a host crash while a resumed 5-player campaign loads, crashes on the way back from a battle. Send every player's `Report.bat` file.
 - With 3+ players: no weather choice before a battle, and no markers on the campaign map. Please tell us what you expected to see and where (screenshot from a 2-player game helps).
 - A player who leaves while a popup of theirs is open (diplomacy offer, bankruptcy) can block everyone after the AI takes their clan.
 

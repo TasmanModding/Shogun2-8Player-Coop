@@ -167,6 +167,27 @@ long campaigns; both players saving. No official root cause is known.
   481702A6..., not a published hash) with no crash reporter on the map; its "battle desync" lines are routine checks.
   Report (2) (camera stopped moving) likewise shows no real desync. Both need v1.14 logs from every player.
 
+## v1.15 findings (10 Nov 2026, from v1.14 crash reports)
+Crash file eip/stack minus the logged DLL base + 10000000 = static VA (Report.bat now prints these).
+- **Spectate crash** (Maxiliase, 5-player co-op, host clicked "spectate", eax = 0 at 11179565): FUN_11179540
+  (non-fighter panel, vfunc +74h; buttons in FUN_11195750) reads [FUN_105b7b90(clan)+4]. For a clan not in the
+  battle, FUN_105b7b90 walks the pending battle's human slots ([pb+80h], count [pb+7Ch], 10h bytes, [+0Eh] = 0)
+  and assigns ebx = FUN_105b7c50(slot clan) each time (sides: attacker [pb+60h], defender [pb+64h]; main army =
+  side+8), so the LAST slot wins even when 0. Fix: call at 105B7C2A keeps the previous result (and flag) when the
+  new one is 0; call at 1117955E falls back to [pb+60h]+8.
+- **Results popup with a freed battle** (wolfman20, 4-player H2H, non-host, host auto-resolved; [battle+30h] =
+  8001FFFF at 105B50C2 in FUN_105b50b0 <- FUN_11185d70 <- PopupPostBattle::Initialise FUN_11172df0 <- listener
+  11122780, vtable slot 11716AE8). FUN_111291d0 queues "popup_battle_results" with event {vtable 11716AE4, [+4]
+  [[ui+A98h]+B0h], [+8] [model+14A4h] = pending battle}. The non-fighter had the spectate/play-as-AI panel open
+  (role check 200) so the popup opened later. Fix: slot stub opens it only if [ev+8] == current [model+14A4h];
+  verified in single player (fought + conceded battle: logged 1, popup shown).
+- **Resync during a campaign battle**: FUN_10ee9a50 calls FUN_10f058d0 at 10EE9A63 before the (skipped) kick;
+  Maxiliase's log shows resync states 1-3-2-0 / 1-2 during a battle and a player dropping. Now skipped when
+  [session+596D0h] and [session+596D8h] are set (pending resync takes over on the map).
+- Not fixed: host crash 10 s into loading a resumed 5-player campaign (Maxiliase crash 1): bit reader
+  FUN_10ee64f0 read past a received message (<- FUN_10edbce0 <- FUN_10f1f9a0 <- network tick FUN_10f102d0).
+  Happened once; the rehost loaded. Needs the .dmp if it repeats.
+
 ## Tester reports after v1.12 (26 Oct 2026), not solved yet
 - **Black screen "waiting for other players" (309 s left) when a battle loads** (2 players, large overhaul mods:
   Expanded Japan, MOSS/MUST and ~20 other packs; rebel army attacking a human city). Host's mp_battle_desync.txt:

@@ -174,6 +174,22 @@ else { Line "(not found: $logPath)" }
 
 Section "Crash report (eightplayer_crash.txt)"
 Dump (GameFile 'eightplayer_crash.txt')
+# the same addresses as the developer's disassembly uses (DLL loaded at 10000000): crash point, then the
+# stack values that point into empire.retail.dll (likely return addresses, newest first)
+$crashFile = GameFile 'eightplayer_crash.txt'
+if (Test-Path $crashFile) {
+	$ct = [IO.File]::ReadAllText($crashFile)
+	$cm = [regex]::Match($ct, 'at ([0-9A-F]{8})\s+empire\.retail\.dll base ([0-9A-F]{8})')
+	if ($cm.Success) {
+		$cbase = [Convert]::ToUInt32($cm.Groups[2].Value, 16)
+		$toVa = { param($x) '{0:X8}' -f ([uint32]$x - $cbase + 0x10000000) }
+		$inDll = { param($x) $x -ge $cbase -and $x -lt ($cbase + 0x1E00000) }
+		Line ("Crash point in DLL addresses: {0}" -f (& $toVa ([Convert]::ToUInt32($cm.Groups[1].Value, 16))))
+		$stackPart = $ct.Substring([Math]::Max(0, $ct.IndexOf('stack:')))
+		$rets = @([regex]::Matches($stackPart, '\b[0-9A-F]{8}\b') | ForEach-Object { [Convert]::ToUInt32($_.Value, 16) } | Where-Object { & $inDll $_ } | Select-Object -First 16 | ForEach-Object { & $toVa $_ })
+		if ($rets.Count) { Line ("Stack values inside the DLL: {0}" -f ($rets -join ' ')) }
+	}
+}
 $dmp = GameFile 'eightplayer_crash.dmp'
 if (Test-Path $dmp) { Line ("(a crash dump also exists: {0}, {1} bytes; only needed if asked for)" -f $dmp, (Get-Item $dmp).Length) }
 Section "Engine errors before an instant close (eightplayer_errors.txt)"

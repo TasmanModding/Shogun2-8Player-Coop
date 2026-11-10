@@ -465,7 +465,7 @@ public static class EightPlayerPatcher {
 	const uint GetCurrentThreadIdIat = 0x115A11F4;
 	const uint CrashPrevFilterVa = 0x11CB1538;   // previous filter (third reserved .data dword)
 	const uint CrashInstalledVa = 0x11CB153C;    // filter installed (fourth)
-	public const string Version = "1.14";
+	public const string Version = "1.15";
 	static uint crashFilterAt;
 
 	// ---- engine error log ------------------------------------------------------------------------------
@@ -1165,6 +1165,107 @@ public static class EightPlayerPatcher {
 		a.Raw(0x52, 0x8B, 0x54, 0x24, 0x14);              // push edx / mov edx,[esp+14h]
 		a.Call(chooser);
 		a.Raw(0x5A, 0xC3);
+		return at;
+	}
+
+	// ---- watching a battle with 3+ players (v1.15) ------------------------------------------------------------
+	// FUN_105b7b90 (a clan's battle side), for a clan that is not in the battle, walks the pending battle's human
+	// slots ([pb+80h], count [pb+7Ch], 10h bytes, [+0Eh] = 0) and takes the side of each slot's clan
+	// (FUN_105b7c50, ebx = result), so the LAST slot wins, even when that clan isn't in this battle (result 0).
+	// With 2 players only one slot fits; with 3+ the last human is often someone else. The "spectate battle"
+	// button (FUN_11179540, the non-fighter panel) then reads [0+4]: Maxiliase's host crash (5-player co-op, an AI
+	// general attacking with a player assisting, eax = 0 at 11179565).
+	//   - 105B7C2A: a slot whose clan isn't in the battle keeps the side found so far (and the is-attacker flag).
+	//   - 1117955E: if no side is found at all, the spectator watches from the attacking side ([pb+60h] + 8, what
+	//     FUN_105b7c90 returns for a side's main army).
+	const uint SideOfSlotCall = 0x105B7C2A;         // call FUN_105b7c50 (thiscall pb; clan, bool*) ret 8
+	const uint SideOfSlot = 0x105B7C50;
+	const uint SpectateSideCall = 0x1117955E;       // call FUN_105b7b90 (thiscall pb; clan, bool*) ret 8
+	const uint SideOfClan = 0x105B7B90;
+
+	static uint EmitSideOfSlotKeep(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x56, 0x8B, 0x74, 0x24, 0x0C);              // push esi / mov esi,[esp+0Ch]   (flag pointer or 0)
+		a.Raw(0x6A, 0x00);                                // push 0                          ([esp] = saved flag)
+		a.Raw(0x85, 0xF6); a.J8(0x74, "sk_call");
+		a.Raw(0x0F, 0xB6, 0x06, 0x89, 0x04, 0x24);        // movzx eax,byte [esi] / mov [esp],eax
+		a.Mark("sk_call");
+		a.Raw(0x56, 0xFF, 0x74, 0x24, 0x10);              // push esi / push [esp+10h]       (clan)
+		a.Call(SideOfSlot);                               // ecx = pb (untouched)
+		a.Raw(0x85, 0xC0); a.J8(0x75, "sk_out");          // found: as the original
+		a.Raw(0x8B, 0xC3);                                // mov eax,ebx                     (side found so far)
+		a.Raw(0x85, 0xF6); a.J8(0x74, "sk_out");
+		a.Raw(0x8A, 0x14, 0x24, 0x88, 0x16);              // mov dl,[esp] / mov [esi],dl     (its flag back)
+		a.Mark("sk_out");
+		a.Raw(0x83, 0xC4, 0x04, 0x5E, 0xC2, 0x08, 0x00);  // add esp,4 / pop esi / ret 8
+		a.Resolve();
+		return at;
+	}
+
+	static uint EmitSpectateSide(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x51);                                      // push ecx                        (pb)
+		a.Raw(0xFF, 0x74, 0x24, 0x0C, 0xFF, 0x74, 0x24, 0x0C);   // push flag / push clan
+		a.Call(SideOfClan);
+		a.Raw(0x59, 0x85, 0xC0); a.J8(0x75, "ss_out");    // pop ecx / test eax,eax
+		a.Raw(0x8B, 0x41, 0x60, 0x85, 0xC0); a.J8(0x74, "ss_out");   // mov eax,[ecx+60h] (attacking side)
+		a.Raw(0x83, 0xC0, 0x08);                          // add eax,8
+		EmitLog(a, "spectate: no side found for this clan; watching from the attacking side", 0);
+		a.Mark("ss_out");
+		a.Raw(0xC2, 0x08, 0x00);                          // ret 8
+		a.Resolve();
+		return at;
+	}
+
+	// ---- battle results popup for a battle that no longer exists (v1.15) --------------------------------------
+	// FUN_111291d0 queues "popup_battle_results" with the campaign's current pending battle ([model+14A4h]) in the
+	// event (vtable 11716AE4: [+4] clan, [+8] battle); the popup opens later (listener 11122780 ->
+	// PopupPostBattle::Initialise FUN_11172df0 -> FUN_11185d70 -> FUN_105b50b0 reads [battle+30h]). A player not in
+	// the battle can still have the "spectate / play as AI" panel open then; when the fighting player auto-resolves,
+	// the battle is gone by the time the queued popup opens: wolfman20's crash (4-player head-to-head, [battle+30h]
+	// = 8001FFFF at 105B50C2). Now the popup only opens if its battle is still the current pending battle, and
+	// the log says which happened.
+	const uint ResultsPopupSlot = 0x11716AE8;
+	const uint ResultsPopupOpen = 0x11122780;     // thiscall(event; ui) ret 4
+
+	static uint EmitResultsPopupGuard(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x60, 0xE8, 0x00, 0x00, 0x00, 0x00);
+		uint B = a.Here;
+		a.Raw(0x5B, 0x33, 0xD2);                          // pop ebx / xor edx,edx
+		a.Raw(0x8B, 0x83); Imm(a, CampaignUiVa - B);      // mov eax,[ui root]
+		a.Raw(0x85, 0xC0); a.J8(0x74, "rp_cmp");
+		a.Raw(0x8B, 0x80, 0x98, 0x0A, 0x00, 0x00, 0x85, 0xC0); a.J8(0x74, "rp_cmp");   // [+0A98h]
+		a.Raw(0x8B, 0x40, 0x08, 0x85, 0xC0); a.J8(0x74, "rp_cmp");                     // model
+		a.Raw(0x8B, 0x90, 0xA4, 0x14, 0x00, 0x00);        // mov edx,[eax+14A4h]   (current pending battle)
+		a.Mark("rp_cmp");
+		a.Raw(0x8B, 0x4C, 0x24, 0x18, 0x33, 0xC0, 0x3B, 0x51, 0x08, 0x0F, 0x94, 0xC0);   // ecx = event / eax = [ev+8] == current
+		EmitLog(a, "battle results popup (1 = shown; 0 = its battle is gone, skipped)", 1);
+		a.Raw(0x85, 0xC0, 0x61);                          // test eax,eax / popad (flags kept)
+		a.J8(0x74, "rp_skip");
+		a.Jmp(ResultsPopupOpen);
+		a.Mark("rp_skip");
+		a.Raw(0xC2, 0x04, 0x00);                          // ret 4
+		a.Resolve();
+		return at;
+	}
+
+	// ---- no resync in the middle of a campaign battle (v1.15) ------------------------------------------------
+	// The desync handler FUN_10ee9a50 starts a resync (FUN_10f058d0) on its first line, before the kick that v1.9
+	// skips. In a campaign battle that sends the campaign to every PC while they are still fighting (Maxiliase's
+	// log: resync states 1-3-2-0 and 1-2 during the battle, a player dropped minutes later). In a campaign battle
+	// it is now left to the pending resync (set by EmitBattleNoKick), which starts once everyone is on the map.
+	const uint DesyncStartResyncCall = 0x10EE9A63;  // call FUN_10f058d0 (thiscall resync; session) ret 4
+
+	static uint EmitNoBattleResync(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x8B, 0x44, 0x24, 0x04);                    // mov eax,[esp+4]           (session)
+		a.Raw(0x83, 0xB8, 0xD0, 0x96, 0x05, 0x00, 0x00); a.J8(0x74, "nb_go");   // no battle
+		a.Raw(0x83, 0xB8, 0xD8, 0x96, 0x05, 0x00, 0x00); a.J8(0x74, "nb_go");   // custom battle: as the original
+		a.Raw(0xC2, 0x04, 0x00);
+		a.Mark("nb_go");
+		a.Jmp(StartResync);
+		a.Resolve();
 		return at;
 	}
 
@@ -2676,6 +2777,10 @@ public static class EightPlayerPatcher {
 		ExpectBytes(AiArmyHumansJump - 3, 0x83, 0xFB, 0x02, 0x75, 0x23);
 		b[VaToOff(AiArmyHumansJump)] = 0x72;
 		ReserveDataDword(AskingClanVa);
+		RedirectCall(SideOfSlotCall, SideOfSlot, EmitSideOfSlotKeep(s));
+		RedirectCall(SpectateSideCall, SideOfClan, EmitSpectateSide(s));
+		RedirectSlot(ResultsPopupSlot, ResultsPopupOpen, EmitResultsPopupGuard(s));
+		RedirectCall(DesyncStartResyncCall, StartResync, EmitNoBattleResync(s));
 		RedirectSlot(WaitingShowSlot, 0x11153FA0, EmitWaitingLog(s, 0x11153FA0, "campaign map: 'waiting for players' screen opened (every PC loads the battle)"));
 		RedirectSlot(WaitingHideSlot, 0x11153F50, EmitWaitingLog(s, 0x11153F50, "campaign map: 'waiting for players' screen closed"));
 		ReserveDataDword(LogStartedVa);
