@@ -197,8 +197,17 @@ Crash file eip/stack minus the logged DLL base + 10000000 = static VA (Report.ba
   appmanifest_34330.acf (installdir from it), requires Shogun2.exe + data\data.pack, and install.ps1 asks for
   the folder interactively when nothing is found.
 - Not fixed: host crash 10 s into loading a resumed 5-player campaign (Maxiliase crash 1): bit reader
-  FUN_10ee64f0 read past a received message (<- FUN_10edbce0 <- FUN_10f1f9a0 <- network tick FUN_10f102d0).
-  Happened once; the rehost loaded. Needs the .dmp if it repeats.
+  FUN_10ee64f0 <- FUN_10edbce0 <- FUN_10f1f9a0 <- FUN_10ecdd10 (read 1 byte) <- 10F10A4F in the network tick
+  FUN_10f102d0. That read is the FIRST byte (message type, switch at 10F10A67 over A0h..ACh) of a received
+  message: the loop at 10F109FB walks 1810h-byte slots ([obj+8], count [obj+4], size [slot+1804h], data
+  [slot+4]) and the slot itself was unreadable, so the slot array was most likely reallocated or freed while
+  being walked (a handler queuing more messages; more likely with 5 players). The 0x28000-byte tick frame hides
+  the outer frames from the 64-dword stack dump: needs eightplayer_crash.dmp. Happened once; the rehost loaded.
+- Weather choice with 3+ players (S15): the flag at 105BE68D (arg 13 of FUN_1011d820) depends on [model+155Ch],
+  [pb+0D0h], [pb+58h], FUN_105e8000, each side's clan being human ([+6A0h]) and per-side general checks
+  (FUN_10cca3a0 / FUN_10cca2c0 on [[side+64h]+54h] -> [+170h]); the wait panel FUN_110cc1c0 only wires
+  button_wait / button_battle_start. No player-count test anywhere on that path, so the report may depend on
+  the generals involved; needs a 2-player vs 3-player comparison of the same battle.
 
 ## Tester reports after v1.12 (26 Oct 2026), not solved yet
 - **Black screen "waiting for other players" (309 s left) when a battle loads** (2 players, large overhaul mods:
