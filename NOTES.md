@@ -203,6 +203,18 @@ Crash file eip/stack minus the logged DLL base + 10000000 = static VA (Report.ba
   [slot+4]) and the slot itself was unreadable, so the slot array was most likely reallocated or freed while
   being walked (a handler queuing more messages; more likely with 5 players). The 0x28000-byte tick frame hides
   the outer frames from the 64-dword stack dump: needs eightplayer_crash.dmp. Happened once; the rehost loaded.
+- **Battle ping markers with 2+ watchers (fixed, likely the "no markers with 3+ players" report)**: FUN_110889b0
+  (battle pings, "ping_waypoint_id_%d_%d_%d" / "ping_path_land", 10x8 textures per table entry) builds its
+  player table in FUN_110bbe60: the battle's players, then in spectate mode ([setup+28255h]) the spectator from
+  FUN_110de560 = the FIRST one only (call 110BC144; the 5th caller of FUN_110de560, missed by the v1.8 gift
+  fix). Now 11088ADF runs FUN_110bbe60 once per spectator (index 11CB197C) and 110BC144 returns spectator
+  #index; entries already in the table are found and skipped. CPU-tested with fakes (0/1/3 spectators).
+- Ctrl+Shift+F9 cancelling a running resync (FUN_10f25890: state 0, frees [resync+38h]) is something the game's
+  own resync update FUN_10f34f00 does in many states, on the same thread, so it is not shown to be the host
+  crash Radek saw; needs the host's crash file.
+- Battle stall after a battle desync (S4): the v1.9 skip at 10EE9A71 only skips FUN_10f033e0(3) (the desynced
+  PC leaving); nothing else in FUN_10ee9a50 is skipped, so a stall caused by it is not shown in code. Needs a
+  v1.15 log from a stuck battle without other mods.
 - Weather choice with 3+ players (S15): the flag at 105BE68D (arg 13 of FUN_1011d820) depends on [model+155Ch],
   [pb+0D0h], [pb+58h], FUN_105e8000, each side's clan being human ([+6A0h]) and per-side general checks
   (FUN_10cca3a0 / FUN_10cca2c0 on [[side+64h]+54h] -> [+170h]); the wait panel FUN_110cc1c0 only wires

@@ -1250,6 +1250,71 @@ public static class EightPlayerPatcher {
 		return at;
 	}
 
+	// ---- battle ping markers for every watcher (v1.15) --------------------------------------------------------
+	// FUN_110889b0 (battle pings: "ping_waypoint_id_%d_%d_%d", "ping_path_land") builds its player table with
+	// FUN_110bbe60: every player on the battle's sides, then, in spectate mode ([setup+28255h]), the spectator
+	// FUN_110de560 returns: always the FIRST one. With 2+ watchers the others had no ping markers (the "no
+	// markers with 3+ players" report). Now the table is built once per spectator: 11088ADF calls FUN_110bbe60
+	// with an index 0..n-1, and its spectator lookup (110BC144) returns spectator #index. Players already in the
+	// table are found and skipped by FUN_110bbe60, so each pass only adds its spectator.
+	const uint PingTableCall = 0x11088ADF;       // call FUN_110bbe60 (fastcall this)
+	const uint PingTableBuild = 0x110BBE60;
+	const uint PingSpectatorCall = 0x110BC144;   // call FUN_110de560 (thiscall ui; uint* out) ret 4
+	const uint PingSpectatorIndexVa = 0x11CB197C;
+
+	static uint EmitPingSpectatorPick(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x53, 0x56);                                // push ebx / push esi
+		a.Raw(0x8B, 0x81, 0x10, 0x01, 0x00, 0x00);        // mov eax,[ecx+110h]      (battle setup)
+		a.Raw(0x8B, 0x88, 0x48, 0x82, 0x02, 0x00);        // mov ecx,[eax+28248h]    (session)
+		a.Raw(0x6A, 0x00, 0x6A, 0x00, 0x6A, 0x00, 0x54);  // list {cap, count, data} / push esp
+		a.Call(ListSpectators);
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);
+		uint B = a.Here;
+		a.Raw(0x5B, 0x8B, 0x83); Imm(a, PingSpectatorIndexVa - B);   // pop ebx / mov eax,[index]
+		a.Raw(0x83, 0xCA, 0xFF);                          // or edx,-1               (none)
+		a.Raw(0x3B, 0x44, 0x24, 0x04); a.J8(0x73, "ps_store");   // index >= count
+		a.Raw(0x8B, 0x4C, 0x24, 0x08, 0x8B, 0x14, 0x81);  // mov ecx,[data] / mov edx,[ecx+eax*4]
+		a.Mark("ps_store");
+		a.Raw(0x8B, 0x44, 0x24, 0x18, 0x89, 0x10);        // mov eax,[esp+18h] (out) / mov [eax],edx
+		a.Raw(0x8B, 0x4C, 0x24, 0x08, 0x85, 0xC9); a.J8(0x74, "ps_nofree");
+		a.Raw(0x51); a.Call(EngineFree); a.Raw(0x83, 0xC4, 0x04);
+		a.Mark("ps_nofree");
+		a.Raw(0x83, 0xC4, 0x0C, 0x5E, 0x5B, 0xC2, 0x04, 0x00);   // drop list / pop esi / pop ebx / ret 4
+		a.Resolve();
+		return at;
+	}
+
+	static uint EmitPingTableAllSpectators(Asm a) {
+		uint at = a.Here;
+		a.Raw(0x56, 0x57, 0x8B, 0xF1);                    // push esi / push edi / mov esi,ecx
+		a.Raw(0xE8, 0x00, 0x00, 0x00, 0x00);
+		uint B = a.Here;
+		a.Raw(0x5F, 0xC7, 0x87); Imm(a, PingSpectatorIndexVa - B); Imm(a, 0);   // pop edi / index = 0
+		a.Mark("pt_loop");
+		a.Raw(0x8B, 0xCE); a.Call(PingTableBuild);
+		a.Raw(0x8B, 0x87); Imm(a, BattleUiVa - B);        // mov eax,[battle ui root]
+		a.Raw(0x85, 0xC0); a.J8(0x74, "pt_done");
+		a.Raw(0x8B, 0x80, 0x10, 0x01, 0x00, 0x00, 0x85, 0xC0); a.J8(0x74, "pt_done");   // setup
+		a.Raw(0x80, 0xB8, 0x55, 0x82, 0x02, 0x00, 0x00); a.J8(0x74, "pt_done");         // not spectate mode: once
+		a.Raw(0x8B, 0x88, 0x48, 0x82, 0x02, 0x00, 0x85, 0xC9); a.J8(0x74, "pt_done");   // session
+		a.Raw(0x6A, 0x00, 0x6A, 0x00, 0x6A, 0x00, 0x54);  // list / push esp
+		a.Call(ListSpectators);
+		a.Raw(0x8B, 0x44, 0x24, 0x04, 0x8B, 0x4C, 0x24, 0x08, 0x83, 0xC4, 0x0C, 0x50);   // eax = count / ecx = data / drop / push eax
+		a.Raw(0x85, 0xC9); a.J8(0x74, "pt_nofree");
+		a.Raw(0x51); a.Call(EngineFree); a.Raw(0x83, 0xC4, 0x04);
+		a.Mark("pt_nofree");
+		a.Raw(0x58);                                      // pop eax                 (count)
+		a.Raw(0xFF, 0x87); Imm(a, PingSpectatorIndexVa - B);   // next spectator
+		a.Raw(0x3B, 0x87); Imm(a, PingSpectatorIndexVa - B);   // cmp eax,[index]
+		a.J8(0x77, "pt_loop");                            // count > index: another pass
+		a.Mark("pt_done");
+		a.Raw(0xC7, 0x87); Imm(a, PingSpectatorIndexVa - B); Imm(a, 0);
+		a.Raw(0x5F, 0x5E, 0xC3);                          // pop edi / pop esi / ret
+		a.Resolve();
+		return at;
+	}
+
 	// ---- no resync in the middle of a campaign battle (v1.15) ------------------------------------------------
 	// The desync handler FUN_10ee9a50 starts a resync (FUN_10f058d0) on its first line, before the kick that v1.9
 	// skips. In a campaign battle that sends the campaign to every PC while they are still fighting (Maxiliase's
@@ -2781,11 +2846,14 @@ public static class EightPlayerPatcher {
 		RedirectCall(SpectateSideCall, SideOfClan, EmitSpectateSide(s));
 		RedirectSlot(ResultsPopupSlot, ResultsPopupOpen, EmitResultsPopupGuard(s));
 		RedirectCall(DesyncStartResyncCall, StartResync, EmitNoBattleResync(s));
+		RedirectCall(PingSpectatorCall, 0x110DE560, EmitPingSpectatorPick(s));
+		RedirectCall(PingTableCall, PingTableBuild, EmitPingTableAllSpectators(s));
 		RedirectSlot(WaitingShowSlot, 0x11153FA0, EmitWaitingLog(s, 0x11153FA0, "campaign map: 'waiting for players' screen opened (every PC loads the battle)"));
 		RedirectSlot(WaitingHideSlot, 0x11153F50, EmitWaitingLog(s, 0x11153F50, "campaign map: 'waiting for players' screen closed"));
 		ReserveDataDword(LogStartedVa);
 		ReserveDataDword(WatchVa + (WatchSlots - 1) * 4);
 		ReserveDataDword(PendingWhyLastVa);              // also covers 11CB1964..1974 (rate limits, battle role)
+		ReserveDataDword(PingSpectatorIndexVa);
 		AddSection(".s2mp", s.Bytes);
 
 		File.WriteAllBytes(outPath, b);

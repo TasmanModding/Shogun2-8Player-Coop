@@ -50,7 +50,7 @@ Everyone must also end up with the same two hashes, or they can't join each othe
 
 | File | SHA-256 |
 |---|---|
-| `empire.retail.dll` | `EF26E0EEBC101F2C5919FD3B9177C1C711DBB70DE2B39512AC25A50047C94F30` |
+| `empire.retail.dll` | `2BBC597284D4A171128F31C5107B13756F8D350F8FEB5F7DECAF1C37B8CA2169` |
 | `data\eightplayer_coop.pack` | `983F63E02958AF253B911934680AEE736CED160B2BB9FC152023EBCF479853F5` |
 
 ## Before you play
@@ -114,6 +114,7 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 **Everyone update.** Thanks for the v1.14 `Report.bat` files: the new crash reporter caught the crashes, so they could be traced.
 - **"Spectate battle" crashed the game with 3+ players** (e.g. 5-player co-op, an AI general attacking with a player assisting). To show a battle to someone not in it, the game looked up the side of *every* human and kept the answer for the last one, even when that player wasn't in the battle. With 2 players there was only one to check. Now a player outside the battle keeps the side already found, and if none is found they watch from the attacking side.
 - **The game closed when the host auto-resolved a battle** (4-player head-to-head) on PCs of players who weren't in it. Their results popup was queued for a battle that auto-resolve had already removed. The popup is now skipped when its battle is gone (the log says so).
+- **Ping markers for every player watching a battle.** When a battle starts, the game sets up ping markers for the players in it and for only the first player watching; with 2 or more watchers, the others had none. Every watcher now gets them.
 - **No more resync in the middle of a campaign battle.** On a desync during a battle the game started a resync right away, while everyone was still fighting. It now waits until everyone is back on the campaign map (as intended since v1.9).
 - **`Report.bat`** converts the crash address into the form needed to find the cause.
 - **Installer finds the right game folder:** it now uses the folder Steam installed the game in, so an old leftover copy on another drive is ignored. If it can't find the game, it asks you to paste the folder.
@@ -137,7 +138,7 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 
 **Being investigated, please report with `Report.bat`:**
 - Battles that never load (black screen, "waiting for other players"), a host crash while a resumed 5-player campaign loads, crashes on the way back from a battle. Send every player's `Report.bat` file.
-- With 3+ players: no weather choice before a battle, and no markers on the campaign map. Please tell us what you expected to see and where (screenshot from a 2-player game helps).
+- With 3+ players: no weather choice before a battle (the game offers it only for certain generals, so please compare the same battle with 2 players). If markers are still missing for some players in v1.15, tell us where (battle or campaign map) with a screenshot.
 - A player who leaves while a popup of theirs is open (diplomacy offer, bankruptcy) can block everyone after the AI takes their clan.
 
 ## v1.12: resync fixed for 3+ players
