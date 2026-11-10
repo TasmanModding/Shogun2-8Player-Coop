@@ -34,13 +34,15 @@ Join the **Tasman Modding Discord** for help, finding players, bug reports and u
 
 ## Install / uninstall
 1. Everyone closes Shogun 2.
-2. Double-click **`Install.bat`**. It finds the game in your Steam folders. If yours is somewhere else, run
+2. Double-click **`Install.bat`**. It finds the game where Steam installed it. If it can't, it asks you to paste the game folder (in Steam: right-click the game > Manage > Browse local files, then copy the path from the address bar). You can also run
    `powershell -ExecutionPolicy Bypass -File install.ps1 -GamePath "D:\...\Total War SHOGUN 2"`.
 3. Start Shogun 2 from Steam and host a multiplayer campaign.
 
 **Updating:** every new version is published on [GitHub](https://github.com/TasmanModding/Shogun2-8Player-Coop/releases/latest). Steam Workshop can only share `.pack` files, so it can't update the engine part of the mod for you. Download the newest zip, unzip it and run `Install.bat`: it replaces the old version. New versions are announced in the [Discord](https://discord.gg/vt4JbH79Np). Update together with your friends, since everyone needs the same version.
 
-**`Uninstall.bat`** puts everything back. Steam's "Verify integrity of game files" also restores the original DLL.
+**`Uninstall.bat`** puts everything back and checks that `empire.retail.dll` is the original again (if not, it tells you to use Steam's "Verify integrity of game files"). Also unsubscribe from the Workshop item, or untick it in the launcher: it still changes the campaign lobby while it's enabled. Multiplayer saves from games with 3 or more players don't show in the unmodded game's Load list (it can only load 2-player games); they stay in your save folder and come back when you reinstall the mod.
+
+**Windows only.** The installer patches the Windows version of the game; there is no Linux version, and Linux and Windows players can't play Shogun 2 multiplayer together.
 
 At the end the installer prints a **MATCH CODE** (8 letters/digits). Everyone compares it: the same code means the same game files, including any other mods. A different code means someone has a different mod enabled, which causes desyncs; the installer also warns about other enabled mods.
 
@@ -114,6 +116,8 @@ Please report the step where it breaks, what you saw, and copy the newest files 
 - **The game closed when the host auto-resolved a battle** (4-player head-to-head) on PCs of players who weren't in it. Their results popup was queued for a battle that auto-resolve had already removed. The popup is now skipped when its battle is gone (the log says so).
 - **No more resync in the middle of a campaign battle.** On a desync during a battle the game started a resync right away, while everyone was still fighting. It now waits until everyone is back on the campaign map (as intended since v1.9).
 - **`Report.bat`** converts the crash address into the form needed to find the cause.
+- **Installer finds the right game folder:** it now uses the folder Steam installed the game in, so an old leftover copy on another drive is ignored. If it can't find the game, it asks you to paste the folder.
+- **Uninstall is more thorough:** it checks the original DLL is back, removes every file the mod added, and reminds you to unsubscribe from the Workshop item.
 
 ## v1.14: Ctrl+Shift+F9 and automatic resync now actually run on the campaign map
 **Everyone update.** The v1.13 event logs you sent showed the real problem:

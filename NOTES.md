@@ -184,6 +184,18 @@ Crash file eip/stack minus the logged DLL base + 10000000 = static VA (Report.ba
 - **Resync during a campaign battle**: FUN_10ee9a50 calls FUN_10f058d0 at 10EE9A63 before the (skipped) kick;
   Maxiliase's log shows resync states 1-3-2-0 / 1-2 during a battle and a player dropping. Now skipped when
   [session+596D0h] and [session+596D8h] are set (pending resync takes over on the map).
+- **Uninstall / vanilla multiplayer (MrSuspicious)**: tested here after `install.ps1 -Uninstall` (DLL back to
+  022FAE2E...): vanilla lobby creation and Avatar Conquest work; "Resume as Host" is EMPTY although a 3-player
+  autosave made with the mod is in save_games_multiplayer (vanilla can't list 3+ player saves; they return after a
+  reinstall). Not reproduced: lobby creation failing, Avatar Conquest crash, "Error while creating a session", and
+  "fixed until a reboot" point at Steam/network or the Workshop pack (eightplayer_coop_lobby.pack, mod type
+  PFH3 type 3, only `ui\frontend ui\mp_grand_campaign`) still enabled with the vanilla DLL. Uninstall now also
+  removes its mod line, data\eightplayer_coop_lobby.pack, empire.retail.dll.8p-tmp, verifies the DLL hash and
+  says to unsubscribe.
+- **Installer picked the wrong drive (SPC Sandbag: "looked for E:", game on G:)**: Find-ShogunFolder returned the
+  first library with an empire.retail.dll, so a leftover copy won. It now prefers the library holding
+  appmanifest_34330.acf (installdir from it), requires Shogun2.exe + data\data.pack, and install.ps1 asks for
+  the folder interactively when nothing is found.
 - Not fixed: host crash 10 s into loading a resumed 5-player campaign (Maxiliase crash 1): bit reader
   FUN_10ee64f0 read past a received message (<- FUN_10edbce0 <- FUN_10f1f9a0 <- network tick FUN_10f102d0).
   Happened once; the rehost loaded. Needs the .dmp if it repeats.

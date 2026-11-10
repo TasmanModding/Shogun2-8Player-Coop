@@ -19,7 +19,9 @@ function Get-MatchInfo([string]$GamePath, [string]$UserScript) {
 	New-Object PSObject -Property @{ Code = $code; Others = $others; DllSha = $parts[0]; PackSha = $parts[1] }
 }
 
-# the game folder from the Steam libraries (first one that has Shogun 2), or "" if none
+# the game folder from the Steam libraries, or "" if none. v1.15: prefers the library whose appmanifest_34330.acf
+# says Steam installed Shogun 2 there, and only takes complete folders (a tester's old leftover copy on E: was
+# picked over the real game on G:).
 function Find-ShogunFolder {
 	$roots = @()
 	foreach ($k in 'HKCU:\Software\Valve\Steam', 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam') {
@@ -32,9 +34,23 @@ function Find-ShogunFolder {
 		$vdf = Join-Path $r 'steamapps\libraryfolders.vdf'
 		if (Test-Path $vdf) { foreach ($m in [regex]::Matches((Get-Content $vdf -Raw), '"path"\s+"([^"]+)"')) { $libs += $m.Groups[1].Value.Replace('\\', '\') } }
 	}
-	foreach ($l in ($libs | Select-Object -Unique)) {
+	$libs = @($libs | ForEach-Object { $_.Replace('/', '\').TrimEnd('\') } | Select-Object -Unique)
+	$complete = {
+		param($c) (Test-Path (Join-Path $c 'empire.retail.dll')) -and (Test-Path (Join-Path $c 'Shogun2.exe')) -and (Test-Path (Join-Path $c 'data\data.pack'))
+	}
+	# 1. where Steam says the game is installed
+	foreach ($l in $libs) {
+		$acf = Join-Path $l 'steamapps\appmanifest_34330.acf'
+		if (-not (Test-Path $acf)) { continue }
+		$dir = [regex]::Match((Get-Content $acf -Raw), '"installdir"\s+"([^"]+)"').Groups[1].Value
+		if (-not $dir) { $dir = 'Total War Shogun 2' }
+		$c = Join-Path $l "steamapps\common\$dir"
+		if (& $complete $c) { return $c }
+	}
+	# 2. any complete copy in a Steam library
+	foreach ($l in $libs) {
 		$c = Join-Path $l 'steamapps\common\Total War Shogun 2'
-		if (Test-Path (Join-Path $c 'empire.retail.dll')) { return $c }
+		if (& $complete $c) { return $c }
 	}
 	return ""
 }

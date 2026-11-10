@@ -23,7 +23,13 @@ foreach ($t in @(@('Layout', 'LayoutTool'), @('Pack', 'PackTools'), @('PackWrite
 # find the game in any Steam library if no path was given
 if (-not $GamePath) {
 	$GamePath = Find-ShogunFolder
-	if (-not $GamePath) { throw "Couldn't find Total War: Shogun 2. Run with -GamePath ""<your game folder>""." }
+	if (-not $GamePath -and [Environment]::UserInteractive) {
+		# double-clicked Install.bat / Uninstall.bat can't pass -GamePath: ask for the folder instead
+		"Couldn't find Total War: SHOGUN 2 in your Steam libraries."
+		"In Steam: right-click the game > Manage > Browse local files, copy the folder path from the address bar,"
+		$GamePath = (Read-Host "and paste it here").Trim().Trim('"')
+	}
+	if (-not $GamePath) { throw "Couldn't find Total War: Shogun 2. Run: powershell -ExecutionPolicy Bypass -File install.ps1 -GamePath ""D:\...\Total War SHOGUN 2""" }
 }
 "Game folder: $GamePath"
 
@@ -56,15 +62,27 @@ if (Get-Process -Name 'shogun2*' -ErrorAction SilentlyContinue) { throw "Close S
 if (-not (Test-Path $dll)) { throw "empire.retail.dll not found in '$GamePath' (pass -GamePath)." }
 
 if ($Uninstall) {
+	# v1.15: a tester was left with a game that couldn't host vanilla multiplayer after uninstalling. Uninstall now
+	# also removes the Workshop lobby pack's mod line and leftovers, and checks the DLL is really the original.
 	if (Test-Path $backup) {
 		if ((Sha $backup) -ne $orig) { throw "Backup doesn't match the original game DLL; not restoring. Use Steam 'Verify integrity' instead." }
 		Copy-Item $backup $dll -Force
 		Remove-Item $backup
 		"Restored the original empire.retail.dll."
 	}
-	else { "No backup found; empire.retail.dll left as it is." }
-	if (Test-Path $packPath) { Remove-Item $packPath; "Removed data\$packName." }
+	foreach ($f in @($packPath, "$dll.8p-tmp", (Join-Path $GamePath 'data\eightplayer_coop_lobby.pack'))) {
+		if (Test-Path $f) { Remove-Item $f; "Removed $($f.Substring($GamePath.Length).TrimStart('\'))." }
+	}
 	RemoveModLine $modLine
+	RemoveModLine 'mod "eightplayer_coop_lobby.pack";'
+	""
+	if ((Sha $dll) -eq $orig) { "empire.retail.dll is the original game file again." }
+	else {
+		Write-Warning "empire.retail.dll is still NOT the original game file (no usable backup)."
+		Write-Warning "In Steam: right-click Total War: SHOGUN 2 > Properties > Installed Files > Verify integrity of game files."
+	}
+	"If you subscribed to the '8 Player Co-op Campaign' Workshop item, unsubscribe from it too (or untick it in the"
+	"game's launcher / Mod Manager): it still changes the campaign lobby layout while it is enabled."
 	"Uninstalled."
 	return
 }
